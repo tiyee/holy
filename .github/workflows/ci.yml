@@ -1,0 +1,60 @@
+name: Go
+on: [push, pull_request]
+permissions:
+  contents: read
+env:
+  GOTOOLCHAIN: local
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        go: ['1.26.0', 'stable']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+          cache: true
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test -race -count=1 ./...
+  integration:
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: holy_test_password
+          MYSQL_DATABASE: holy_test
+          MYSQL_USER: holy
+          MYSQL_PASSWORD: holy_test_password
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -pholy_test_password"
+          --health-interval=5s
+          --health-timeout=3s
+          --health-retries=30
+      redis:
+        image: redis:7.4
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=5s
+          --health-timeout=3s
+          --health-retries=20
+    env:
+      HOLY_MYSQL_DSN: holy:holy_test_password@tcp(127.0.0.1:3306)/holy_test?parseTime=true
+      HOLY_REQUIRE_MYSQL: '1'
+      HOLY_REDIS_ADDR: 127.0.0.1:6379
+      HOLY_REQUIRE_REDIS: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go test -race -count=1 -v ./components/orm ./components/redis ./stores -run Integration

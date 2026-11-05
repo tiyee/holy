@@ -31,3 +31,8 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# Runtime files
+logs/
+conf/local.toml
+.DS_Store
