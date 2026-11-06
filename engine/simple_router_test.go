@@ -136,7 +136,7 @@ func TestSimpleRouterRejectedInsert(t *testing.T) {
 func TestSimpleRouterHTTP(t *testing.T) {
 	e := New(WithSimpleRouter(), func(e *Engine) { e.HandleMethodNotAllowed = true })
 	var order []string
-	e.Middleware(func(c *Context) { order = append(order, "global"); c.Next() })
+	e.Guard(func(c *Context) { order = append(order, "global"); c.Next() })
 	e.Use(PosAhead, Identical("/api/users/42"), func(c *Context) { order = append(order, "hook"); c.Next() })
 	e.Group("/api", func(c *Context) { order = append(order, "group"); c.Next() }).GET("/users/42", func(c *Context) {
 		order = append(order, "handler")

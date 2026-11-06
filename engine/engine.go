@@ -27,7 +27,7 @@ type Engine struct {
 	hooks                      []Hook
 	pendingFallbacks           Fallbacks
 	fallbackChain              []HandlerFunc
-	middleware                 []HandlerFunc
+	guards                     []HandlerFunc
 	noRoute, noMethod          []HandlerFunc
 	notFound, methodNotAllowed []HandlerFunc
 	// 以下选项只能在首次 ServeHTTP 或 Run 前设置。
@@ -215,7 +215,7 @@ func (e *Engine) setRoute(group *RouterGroup, method, path string, handlers ...H
 		panic("holy: route requires at least one handler")
 	}
 	validateHandlers(handlers)
-	route := &Route{Method: method, Path: path, group: group, HandlerFuncs: group.withMiddleware(handlers)}
+	route := &Route{Method: method, Path: path, group: group, HandlerFuncs: group.withGuards(handlers)}
 	e.router.Insert(method, path, route)
 }
 
@@ -232,13 +232,13 @@ func validMethod(method string) bool {
 	return true
 }
 
-// Middleware 为所有路由及 404/405 注册中间件，与注册先后无关。
-func (e *Engine) Middleware(handlers ...HandlerFunc) {
+// Guard 为所有路由、Fallback 处理器以及 404/405 处理链注册全局守卫。
+func (e *Engine) Guard(handlers ...HandlerFunc) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.checkMutable()
 	validateHandlers(handlers)
-	e.middleware = append(e.middleware, handlers...)
+	e.guards = append(e.guards, handlers...)
 }
 
 func (e *Engine) NoRoute(handlers ...HandlerFunc) {
@@ -331,7 +331,7 @@ func (e *Engine) dispatch() {
 		e.pendingFallbacks = Fallbacks{}
 	}
 	// 共享链只保存分发入口，每个请求选中的处理器挂在自己的 Context 上。
-	e.fallbackChain = makeChain("", "fallback", e.middleware, []HandlerFunc{func(c *Context) { c.fallbackHandler(c) }})
+	e.fallbackChain = makeChain("", "fallback", e.guards, []HandlerFunc{func(c *Context) { c.fallbackHandler(c) }})
 	if e.HandleMethodNotAllowed {
 		// Methods 可能返回实现内部切片，复制后再排序，避免修改调用方状态。
 		e.methods = append([]string(nil), e.router.Methods()...)
@@ -350,7 +350,7 @@ func (e *Engine) dispatch() {
 				}
 			}
 		}
-		route.chain = makeChain(route.Method, route.Path, e.middleware, route.BeforeHooks, route.HandlerFuncs, route.AfterHooks)
+		route.chain = makeChain(route.Method, route.Path, e.guards, route.BeforeHooks, route.HandlerFuncs, route.AfterHooks)
 	}
 	if len(e.noRoute) == 0 {
 		e.noRoute = []HandlerFunc{func(c *Context) { c.NotFound() }}
@@ -358,6 +358,6 @@ func (e *Engine) dispatch() {
 	if len(e.noMethod) == 0 {
 		e.noMethod = []HandlerFunc{func(c *Context) { c.Error("method not allowed", http.StatusMethodNotAllowed) }}
 	}
-	e.notFound = makeChain("", "404", e.middleware, e.noRoute)
-	e.methodNotAllowed = makeChain("", "405", e.middleware, e.noMethod)
+	e.notFound = makeChain("", "404", e.guards, e.noRoute)
+	e.methodNotAllowed = makeChain("", "405", e.guards, e.noMethod)
 }

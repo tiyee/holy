@@ -7,7 +7,7 @@ import (
 )
 
 func LoadRouter(r *engine.Engine) {
-	r.Middleware(hooks.Logger)
+	r.Guard(hooks.Logger)
 	r.GET("/health", func(c *engine.Context) { c.JSON(200, map[string]string{"status": "ok"}) })
 	api := r.Group("/api/v1")
 	api.Rest("/users/:id", handles.User{})

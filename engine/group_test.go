@@ -45,7 +45,7 @@ func TestGroupsAcrossRouters(t *testing.T) {
 					})
 				}
 			})
-			t.Run("middleware snapshots and order", func(t *testing.T) {
+			t.Run("guard snapshots and order", func(t *testing.T) {
 				e := newEngine()
 				var order []string
 				mark := func(name string) HandlerFunc {
@@ -61,14 +61,14 @@ func TestGroupsAcrossRouters(t *testing.T) {
 				handler := func(c *Context) { order = append(order, "handler"); c.String(200, "ok") }
 				parent.GET("/old", handler)
 				child.GET("/old", handler)
-				parent.Middleware(mark("late-parent"))
-				child.Middleware(mark("late-child"))
+				parent.Guard(mark("late-parent"))
+				child.Guard(mark("late-child"))
 				parent.GET("/new", handler)
 				child.GET("/new", handler)
 				sibling.GET("/health", handler)
 				parent.Group("/v3").GET("/health", handler)
-				// 全局中间件与 Hook 不受路由注册先后影响。
-				e.Middleware(mark("global"))
+				// 全局守卫与 Hook 不受路由注册先后影响。
+				e.Guard(mark("global"))
 				e.Use(PosAhead, Prefix("/api", nil), mark("before"))
 				e.Use(PosBehind, Prefix("/api", nil), func(*Context) { order = append(order, "after") })
 				for _, tc := range []struct{ path, want string }{
@@ -94,7 +94,7 @@ func TestGroupsAcrossRouters(t *testing.T) {
 				mark := func(name string) HandlerFunc {
 					return func(*Context) { order = append(order, name) }
 				}
-				api := e.Group("/api", mark("middleware"))
+				api := e.Group("/api", mark("guard"))
 				v1 := api.Group("/v1")
 				v1.GET("/users/:id", mark("get"))
 				all := Prefix("/", nil)
@@ -122,11 +122,11 @@ func TestGroupsAcrossRouters(t *testing.T) {
 					code         int
 					want         string
 				}{
-					{"GET", userPath, 200, "child-before,global-before,parent-before,middleware,get,audit,global-after,child-after"},
-					{"POST", userPath, 200, "child-before,global-before,parent-before,middleware,post,global-after,child-after"},
+					{"GET", userPath, 200, "child-before,global-before,parent-before,guard,get,audit,global-after,child-after"},
+					{"POST", userPath, 200, "child-before,global-before,parent-before,guard,post,global-after,child-after"},
 					{"PUT", userPath, 200, "global-before,put,global-after"},
-					{"GET", "/api/health", 200, "global-before,parent-before,middleware,health,global-after"},
-					{"GET", "/api/v2/health", 200, "global-before,parent-before,middleware,health,global-after"},
+					{"GET", "/api/health", 200, "global-before,parent-before,guard,health,global-after"},
+					{"GET", "/api/v2/health", 200, "global-before,parent-before,guard,health,global-after"},
 					{"GET", "/api/v1/other", 200, "global-before,other,global-after"},
 					{"GET", "/api/v1/root", 200, "global-before,root,global-after"},
 					{"GET", "/api/v1/missing", 404, ""},
@@ -178,15 +178,15 @@ func TestGroupsAcrossRouters(t *testing.T) {
 					{"duplicate", func(e *Engine, g *RouterGroup) { e.GET("/api/x", noop); g.GET("/x", noop) }},
 					{"invalid prefix", func(_ *Engine, g *RouterGroup) { g.Group("invalid") }},
 					{"invalid path", func(_ *Engine, g *RouterGroup) { g.GET("invalid", noop) }},
-					{"nil middleware", func(_ *Engine, g *RouterGroup) { g.Middleware(nil) }},
+					{"nil guard", func(_ *Engine, g *RouterGroup) { g.Guard(nil) }},
 					{"invalid hook position", func(_ *Engine, g *RouterGroup) { g.Use(0, Contains(""), noop) }},
 					{"nil hook matcher", func(_ *Engine, g *RouterGroup) { g.Use(PosAhead, nil, noop) }},
 					{"nil hook handler", func(_ *Engine, g *RouterGroup) { g.Use(PosBehind, Contains(""), nil) }},
-					{"nil group middleware", func(_ *Engine, g *RouterGroup) { g.Group("/v1", nil) }},
+					{"nil group guard", func(_ *Engine, g *RouterGroup) { g.Group("/v1", nil) }},
 					{"missing handler", func(_ *Engine, g *RouterGroup) { g.GET("/x") }},
 					{"frozen root", func(e *Engine, _ *RouterGroup) { request(e, "GET", "/"); e.Group("/new") }},
 					{"frozen child", func(e *Engine, g *RouterGroup) { request(e, "GET", "/"); g.Group("/new") }},
-					{"frozen middleware", func(e *Engine, g *RouterGroup) { request(e, "GET", "/"); g.Middleware(noop) }},
+					{"frozen guard", func(e *Engine, g *RouterGroup) { request(e, "GET", "/"); g.Guard(noop) }},
 					{"frozen hook", func(e *Engine, g *RouterGroup) { request(e, "GET", "/"); g.Use(PosAhead, Contains(""), noop) }},
 					{"frozen route", func(e *Engine, g *RouterGroup) { request(e, "GET", "/"); g.GET("/new", noop) }},
 				} {
@@ -207,7 +207,7 @@ func TestGroupsAcrossRouters(t *testing.T) {
 					t.Run(fmt.Sprint(count), func(t *testing.T) {
 						e := newEngine()
 						noop := func(*Context) {}
-						e.Middleware(noop)
+						e.Guard(noop)
 						e.Use(PosAhead, Prefix("/api", nil), noop)
 						handlers := make([]HandlerFunc, count-5)
 						for i := range handlers {

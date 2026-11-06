@@ -6,7 +6,7 @@
 - HTTP 核心只依赖标准库和内置日志组件。
 - 路由存储与匹配由 `engine.IRouter` 接口定义，可用 `engine.WithRouter` 替换实现；默认实现为每个 HTTP method 一棵独立的压缩前缀树（radix tree），设计参考 [Gin 路由树](https://github.com/gin-gonic/gin/blob/master/tree.go)。
 - 内置 `engine.SimpleRouter`，将路由存入有序 slice，通过二分仅匹配 method 和完整路径，不支持参数、通配或正则匹配。
-- 支持静态路由、`:param`、末尾 `*catchAll`、分组、中间件、Hook、REST 接口注册。
+- 支持静态路由、`:param`、末尾 `*catchAll`、分组、守卫、Hook、REST 接口注册。
 - `components/log` 迁自 zlog，提供结构化日志、采样、异步写入和文件滚动，日志组件无第三方依赖。
 - `components/orm` 采用 holydramon 的 ORM v2，支持 metadata 缓存、Context、事务和批量操作。
 - 顶层 `stores` 包管理 MySQL 连接及其生命周期；`components` 包含 ORM、Redis、缓存、JWT 及加密工具，`schema` 提供业务校验接口。外部依赖来自数据库及 Redis 组件。
@@ -22,9 +22,9 @@
 | 目录 | 用途 |
 | --- | --- |
 | `cmd/` | 可直接运行的示例服务及优雅退出逻辑 |
-| `engine/` | HTTP 引擎、路由树、Context、响应、中间件和 Hook |
+| `engine/` | HTTP 引擎、路由树、Context、响应、守卫和 Hook |
 | `router/` | 示例路由注册 |
-| `handles/`、`hooks/` | 示例 REST 处理器和请求日志中间件 |
+| `handles/`、`hooks/` | 示例 REST 处理器和请求日志守卫 |
 | `stores/` | MySQL 连接管理与生命周期 |
 | `components/log/` | 标准库实现的结构化日志 |
 | `components/orm/` | 泛型 ORM、字段映射、批量操作及事务 |
@@ -110,7 +110,7 @@ func main() {
 引擎默认按 `Request.URL.Path` 原始值匹配，要求 Lookup 未命中时恢复参数切片、
 重复注册或结构冲突时 panic、`Iter` 恰好枚举全部已注册路由。
 可用 `engine.WithRouter` 在首次请求前替换实现（例如仅精确匹配的哈希表实现），
-中间件、Hook 和处理链装配仍由引擎完成，不受实现影响。
+守卫、Hook 和处理链装配仍由引擎完成，不受实现影响。
 
 内置的 `SimpleRouter` 可直接替换默认实现，路由注册方式保持一致：
 
@@ -197,7 +197,7 @@ r.GET("/health", func(c *engine.Context) { c.String(http.StatusOK, "ok") })
 ```
 
 上例中 `GET /v1/health` 命中第一项并返回 308，其他未注册的 `/v1/` 路径返回 410。
-选择器只读取请求，可并发调用。接管后的处理链由全局中间件和选中的处理器组成，支持 `Next` 和 `Abort`。
+选择器只读取请求，可并发调用。接管后的处理链由全局守卫和选中的处理器组成，支持 `Next` 和 `Abort`。
 此时 `FullPath()` 和 `Params` 均为空。
 Fallback 不计入 `Methods`、`Iter` 或 405 的 `Allow`。
 
@@ -205,21 +205,21 @@ Fallback 不计入 `Methods`、`Iter` 或 405 的 `Allow`。
 `AddFallback(...engine.FallbackFunc)` 和 `Fallback(*http.Request) engine.HandlerFunc` 的有序实现。
 引擎冻结配置时把通过 Engine 注册的选择器追加到最终使用的路由器已有的选择器之后。
 
-## 中间件与分组
+## 守卫与分组
 
 `Engine.Group` 和 `RouterGroup.Group` 统一处理分组，适用于默认 radix、
 `SimpleRouter` 及通过 `WithRouter` 注入的自定义实现。
-分组在注册时组合完整路径和组级中间件，再交给 Engine 注册；底层路由器通过 `Insert` 接收注册结果。
+分组在注册时组合完整路径和组级守卫，再交给 Engine 注册；底层路由器通过 `Insert` 接收注册结果。
 
 ```go
 r := engine.New()
-r.Middleware(func(c *engine.Context) {
+r.Guard(func(c *engine.Context) {
     // 前置逻辑。
     c.Next()
     // 后置逻辑。
 })
 api := r.Group("/api", authenticate)
-api.Middleware(audit)
+api.Guard(audit)
 v1 := api.Group("/v1")
 v1.GET("/users/:id", getUser)
 
@@ -251,18 +251,18 @@ api.Use(engine.PosBehind, engine.Identical("/api/v1/health"), audit)
 除 `Prefix`（可带排除路径）和 `Identical` 外，Hook 匹配器还有 `Contains(sub)`（路径包含子串）
 和 `RegExp(expr)`（正则，编译失败 panic）；非法位置、nil 匹配器或空处理函数在注册时 panic。
 
-全局 `Middleware` 应用于所有路由和 404/405，与注册先后无关；尾斜杠跳转直接返回。
-分组 `Middleware` 影响其后注册的路由和创建的子分组，中间件在创建子分组时继承。
-原先的 `api.Use(audit)` 写为 `api.Middleware(audit)`。
+全局 `Guard` 应用于所有路由、Fallback 处理器和 404/405，与注册先后无关；尾斜杠跳转直接返回。
+分组 `Guard` 影响其后注册的路由和创建的子分组，守卫在创建子分组时继承。
+`engine.Prefix("/", nil)` 匹配 Hook 作用域内的全部已注册路由。
 
 `api.Use(pos, matcher, fn)` 为通过该分组及其各级子组注册的路由添加 Hook。
 在首次请求或 `Run` 前添加即可，已经注册的路由也会生效。引擎在冻结时将 HTTP 方法和完整路由模板传给匹配器。
 通过引擎或其他独立分组注册的路由，即使路径相同，也只使用各自适用的 Hook。
-执行顺序为全局中间件 → 前置 Hook → 分组中间件及路由处理器 → 后置 Hook。同一位置的引擎和分组 Hook 按 `Use` 调用顺序执行。
+执行顺序为全局守卫 → 前置 Hook → 分组守卫及路由处理器 → 后置 Hook。同一位置的引擎和分组 Hook 按 `Use` 调用顺序执行。
 `Next` 可围绕后续处理执行前后逻辑；`Abort` 阻止后续处理器，不会终止当前函数。
-每条处理链最多 63 个函数，包括中间件和 Hook。
+每条处理链最多 63 个函数，包括守卫和 Hook。
 
-配置在首次 `ServeHTTP` 或 `Run` 时统一装配并冻结，之后注册路由或中间件会 panic。
+配置在首次 `ServeHTTP` 或 `Run` 时统一装配并冻结，之后注册路由或守卫会 panic。
 配置字段也应在启动前设置。冻结后的引擎支持并发处理请求。
 Hook 在 `httptest` 中直接调用 `ServeHTTP` 同样生效。
 
@@ -274,7 +274,7 @@ Hook 在 `httptest` 中直接调用 `ServeHTTP` 同样生效。
 `Ctx()` 继承请求取消和截止时间。`JSONArgs` 在解码后调用 schema 的 `Valid`、`Hook`。
 `BindJSON` 只解码普通对象。
 
-`SetCookie` 默认写入 `SameSite=None`。在处理器或中间件中调用 `c.SetSameSite(http.SameSiteLaxMode)`，
+`SetCookie` 默认写入 `SameSite=None`。在处理器或守卫中调用 `c.SetSameSite(http.SameSiteLaxMode)`，
 即可让当前请求后续的 `SetCookie` 写入 `SameSite=Lax`。
 `SetCookieV2` 在传入的 Cookie 显式设置 `SameSite: http.SameSiteDefaultMode` 时继承当前请求的策略。
 指定 Lax、Strict 或 None 时使用指定值，省略该字段时响应中省略 SameSite 属性。

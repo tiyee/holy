@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-// Logger 演示围绕请求执行的中间件。
+// Logger 演示围绕请求执行的守卫。
 func Logger(c *engine.Context) {
 	started := time.Now()
 	c.Next()

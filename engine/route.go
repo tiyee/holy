@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-// HandlerFunc 是路由或中间件处理函数。
+// HandlerFunc 是路由、守卫和 Hook 共用的处理函数类型。
 type HandlerFunc func(ctx *Context)
 type Route struct {
 	Method                                string

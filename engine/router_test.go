@@ -219,15 +219,15 @@ func TestHooksGroupsAndAbort(t *testing.T) {
 func testRouterHooksGroupsAndAbort(t *testing.T, newRouter func() IRouter) {
 	e := New(WithRouter(newRouter()))
 	var order []string
-	middleware := func(name string) HandlerFunc {
+	mark := func(name string) HandlerFunc {
 		return func(c *Context) { order = append(order, name+"<"); c.Next(); order = append(order, name+">") }
 	}
-	e.Middleware(middleware("global"))
-	api := e.Group("/api", middleware("api"))
-	api.Middleware(middleware("group"))
-	v1 := api.Group("/v1", middleware("v1"))
+	e.Guard(mark("global"))
+	api := e.Group("/api", mark("api"))
+	api.Guard(mark("group"))
+	v1 := api.Group("/v1", mark("v1"))
 	v1.GET("/users/:id", func(c *Context) { order = append(order, "handler:"+c.Param("id")); c.String(200, "ok") })
-	e.Use(PosAhead, Prefix("/api", nil), middleware("before"))
+	e.Use(PosAhead, Prefix("/api", nil), mark("before"))
 	e.Use(PosBehind, Identical("/api/v1/users/:id"), func(*Context) { order = append(order, "after") })
 	for range 2 {
 		order = nil
@@ -245,13 +245,13 @@ func testRouterHooksGroupsAndAbort(t *testing.T, newRouter func() IRouter) {
 	}
 }
 
-func TestFallbackMiddlewareAndFrozenConfiguration(t *testing.T) {
+func TestFallbackGuardAndFrozenConfiguration(t *testing.T) {
 	e := New(func(e *Engine) { e.HandleMethodNotAllowed = true })
-	e.Middleware(func(c *Context) {
+	e.Guard(func(c *Context) {
 		if c.Param("id") != "" || c.FullPath() != "" {
 			t.Error("fallback retained route parameters")
 		}
-		c.Response().Header().Set("X-Middleware", "yes")
+		c.Response().Header().Set("X-Guard", "yes")
 		c.Next()
 	})
 	e.GET("/users/:id", func(*Context) {})
@@ -262,7 +262,7 @@ func TestFallbackMiddlewareAndFrozenConfiguration(t *testing.T) {
 		code         int
 	}{{"GET", "/users/7/missing", 404}, {"DELETE", "/users/7", 405}} {
 		w := request(e, tc.method, tc.path)
-		if w.Code != tc.code || w.Header().Get("X-Middleware") != "yes" {
+		if w.Code != tc.code || w.Header().Get("X-Guard") != "yes" {
 			t.Fatal(w.Code, w.Header())
 		}
 	}
@@ -415,7 +415,7 @@ var _ IRouter = (*exactRouter)(nil)
 func TestCustomRouter(t *testing.T) {
 	e := New(WithRouter(newExactRouter()), func(e *Engine) { e.HandleMethodNotAllowed = true })
 	var order []string
-	e.Middleware(func(c *Context) { order = append(order, "global"); c.Next() })
+	e.Guard(func(c *Context) { order = append(order, "global"); c.Next() })
 	e.Use(PosAhead, Identical("/exact"), func(c *Context) { order = append(order, "hook"); c.Next() })
 	e.GET("/exact", func(c *Context) { order = append(order, "handler"); c.String(200, "ok") })
 	e.POST("/exact", func(c *Context) { c.String(201, "created") })

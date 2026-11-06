@@ -5,7 +5,7 @@ import (
 	"slices"
 )
 
-// RouterGroup 将路径前缀和中间件传给后续注册的路由和子分组。
+// RouterGroup 将路径前缀和守卫传给后续注册的路由和子分组。
 // 分组由 Engine 注册层处理，与底层 IRouter 实现无关。
 type RouterGroup struct {
 	engine   *Engine
@@ -20,7 +20,7 @@ func (e *Engine) Group(prefix string, handlers ...HandlerFunc) *RouterGroup {
 	return e.newGroup(nil, joinPaths("", prefix), handlers)
 }
 
-// Group 创建子分组，并复制父组当前的中间件。父组 Hook 在冻结时统一匹配。
+// Group 创建子分组，并复制父组当前的守卫。父组 Hook 在冻结时统一匹配。
 func (g *RouterGroup) Group(prefix string, handlers ...HandlerFunc) *RouterGroup {
 	return g.engine.newGroup(g, joinPaths(g.prefix, prefix), handlers)
 }
@@ -31,11 +31,11 @@ func (e *Engine) newGroup(parent *RouterGroup, path string, handlers []HandlerFu
 	e.checkMutable()
 	validateHandlers(handlers)
 	validatePath(path)
-	return &RouterGroup{engine: e, parent: parent, prefix: path, handlers: parent.withMiddleware(handlers)}
+	return &RouterGroup{engine: e, parent: parent, prefix: path, handlers: parent.withGuards(handlers)}
 }
 
-// withMiddleware 在注册锁内复制处理链，nil 分组表示直接在引擎上注册。
-func (g *RouterGroup) withMiddleware(handlers []HandlerFunc) []HandlerFunc {
+// withGuards 在注册锁内复制处理链，nil 分组表示直接在引擎上注册。
+func (g *RouterGroup) withGuards(handlers []HandlerFunc) []HandlerFunc {
 	if g == nil {
 		return slices.Clone(handlers)
 	}
@@ -70,8 +70,8 @@ func joinPaths(prefix, path string) string {
 	return prefix + path
 }
 
-// Middleware 为此后注册的路由和创建的子分组添加中间件。
-func (g *RouterGroup) Middleware(handlers ...HandlerFunc) {
+// Guard 为此后注册的路由和创建的子分组添加守卫。
+func (g *RouterGroup) Guard(handlers ...HandlerFunc) {
 	g.engine.mu.Lock()
 	defer g.engine.mu.Unlock()
 	g.engine.checkMutable()

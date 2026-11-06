@@ -33,7 +33,7 @@ func TestFallbackDispatch(t *testing.T) {
 			e := New(WithFallback(resolver("a"), resolver("b")), backend, WithFallback(resolver("c")))
 			e.Fallback(resolver("d"), resolver("e"))
 			e.HandleMethodNotAllowed = true
-			e.Middleware(func(c *Context) {
+			e.Guard(func(c *Context) {
 				calls = append(calls, "before")
 				c.Next()
 				calls = append(calls, "after")

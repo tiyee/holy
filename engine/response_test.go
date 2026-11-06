@@ -152,7 +152,7 @@ func TestTrailingSlashRedirectPreservesPath(t *testing.T) {
 
 func TestMaximumChainDoesNotImplyAbort(t *testing.T) {
 	e := New()
-	e.Middleware(func(c *Context) {
+	e.Guard(func(c *Context) {
 		c.Next()
 		if c.IsAborted() {
 			t.Error("completed chain reported aborted")
@@ -166,11 +166,11 @@ func TestMaximumChainDoesNotImplyAbort(t *testing.T) {
 	request(e, "GET", "/limit")
 }
 
-func TestGroupMiddlewareSnapshot(t *testing.T) {
+func TestGroupGuardSnapshot(t *testing.T) {
 	e := New()
 	parent := e.Group("/api/")
 	child := parent.Group("/v1")
-	parent.Middleware(func(c *Context) { c.Response().Header().Set("X-Parent", "new") })
+	parent.Guard(func(c *Context) { c.Response().Header().Set("X-Parent", "new") })
 	child.GET("/old", func(c *Context) { c.String(200, "old") })
 	parent.GET("/new", func(c *Context) { c.String(200, "new") })
 	if w := request(e, "GET", "/api/v1/old"); w.Code != 200 || w.Header().Get("X-Parent") != "" {
