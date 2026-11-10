@@ -14,9 +14,9 @@ var (
 )
 
 func TestNewWithoutRegisteredDatabase(t *testing.T) {
-	registerTestDB(t, nil, nil)
-	m := New(&legacyMethodModel{})
-	for name, operation := range databaseOperations[*legacyMethodModel]() {
+	resetTestDB(t)
+	m := New(&testRecord{})
+	for name, operation := range databaseOperations[*testRecord]() {
 		t.Run(name, func(t *testing.T) {
 			if err := operation(m); !errors.Is(err, ErrNoDatabase) {
 				t.Fatalf("error = %v, want ErrNoDatabase", err)
@@ -28,7 +28,7 @@ func TestNewWithoutRegisteredDatabase(t *testing.T) {
 func TestContextOnlyDatabaseHandle(t *testing.T) {
 	state := &testDatabase{columns: []string{"id", "name", "score"}, data: [][]driver.Value{{int64(1), "first", int64(2)}}}
 	db := openTestDB(t, state)
-	m := New(&legacyMethodModel{}).SetRDb(contextOnly{db}).SetWDb(contextOnly{db})
+	m := New(&testRecord{}).SetRDb(contextOnly{db}).SetWDb(contextOnly{db})
 	if row, err := m.Row("id=?", []any{1}); err != nil || row.Name != "first" {
 		t.Fatalf("Row = %+v, %v", row, err)
 	}
@@ -49,14 +49,14 @@ func TestContextOnlyDatabaseHandle(t *testing.T) {
 func TestDatabaseRouting(t *testing.T) {
 	read := &testDatabase{columns: []string{"id", "name", "score"}, data: [][]driver.Value{{int64(1), "replica", int64(2)}}}
 	write := &testDatabase{}
-	m := New(&legacyMethodModel{}).SetRDb(openTestDB(t, read)).SetWDb(openTestDB(t, write))
+	m := New(&testRecord{}).SetRDb(openTestDB(t, read)).SetWDb(openTestDB(t, write))
 	if _, err := m.Row("", nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := m.Save(); err != nil {
 		t.Fatal(err)
 	}
-	if len(read.calls) != 1 || len(write.calls) != 1 || m.Record.Name != "replica" {
+	if len(read.calls) != 1 || len(write.calls) != 1 || m.record.Name != "replica" {
 		t.Fatal("read/write routing changed")
 	}
 }
@@ -65,7 +65,7 @@ func TestNilDatabaseHandles(t *testing.T) {
 	var db *sql.DB
 	var tx *sql.Tx
 	for _, handle := range []IDBHandle{nil, db, tx} {
-		m := New(&legacyMethodModel{}).SetRDb(handle).SetWDb(handle)
+		m := New(&testRecord{}).SetRDb(handle).SetWDb(handle)
 		if _, err := m.Count("", nil); !errors.Is(err, ErrNoDatabase) {
 			t.Fatal(err)
 		}

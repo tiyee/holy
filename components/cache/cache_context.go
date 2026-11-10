@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-// currentContext 获取同一提供者快照，不向无 Context 接口降级。
+// currentContext 获取已注册提供者的 Context 操作接口。
 func currentContext(ctx context.Context) (ICacheContext, error) {
 	if ctx == nil {
 		return nil, ErrInvalidContext

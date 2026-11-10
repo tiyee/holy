@@ -39,6 +39,7 @@ func TestGroupsAcrossRouters(t *testing.T) {
 					t.Run(tc.want, func(t *testing.T) {
 						e := newEngine()
 						e.Group(tc.parent).Group(tc.child).GET(tc.path, func(c *Context) { c.String(200, c.FullPath()) })
+						e.Prepare()
 						if w := request(e, "GET", tc.want); w.Code != 200 || w.Body.String() != tc.want {
 							t.Fatalf("code=%d body=%q, want %q", w.Code, w.Body.String(), tc.want)
 						}
@@ -71,6 +72,7 @@ func TestGroupsAcrossRouters(t *testing.T) {
 				e.Guard(mark("global"))
 				e.Use(PosAhead, Prefix("/api", nil), mark("before"))
 				e.Use(PosBehind, Prefix("/api", nil), func(*Context) { order = append(order, "after") })
+				e.Prepare()
 				for _, tc := range []struct{ path, want string }{
 					{"/api/old", "parent<,handler,after,parent>"},
 					{"/api/new", "parent<,late-parent<,handler,after,late-parent>,parent>"},
@@ -112,6 +114,7 @@ func TestGroupsAcrossRouters(t *testing.T) {
 				api.Group("/v2").GET("/health", mark("health"))
 				e.Group("/api/v1").GET("/other", mark("other"))
 				e.GET("/api/v1/root", mark("root"))
+				e.Prepare()
 
 				userPath := "/api/v1/users/:id"
 				if backend.pattern {
@@ -144,6 +147,7 @@ func TestGroupsAcrossRouters(t *testing.T) {
 				e.Group("/private", func(c *Context) { c.AbortWithStatus(401) }).Group("/v1").GET("/health", func(*Context) {
 					t.Error("aborted group handler executed")
 				})
+				e.Prepare()
 				if w := request(e, "GET", "/private/v1/health"); w.Code != 401 {
 					t.Fatal(w.Code)
 				}
@@ -152,20 +156,29 @@ func TestGroupsAcrossRouters(t *testing.T) {
 				e := newEngine()
 				g := e.Group("/api").Group("/v1")
 				g.Rest("/users", restExample{})
-				g.Any("/any", func(c *Context) { c.AbortWithStatus(204) })
-				g.Union([]string{"REPORT", "PROPFIND"}, "/custom", func(c *Context) { c.AbortWithStatus(204) })
+				handler := func(c *Context) { c.AbortWithStatus(204) }
+				e.AnyMethod("/any", handler)
+				g.AnyMethod("/any", handler)
+				g.Union([]string{"REPORT", "PROPFIND"}, "/custom", handler)
+				e.Prepare()
 				for _, method := range []string{"GET", "POST"} {
 					if w := request(e, method, "/api/v1/users"); w.Code != map[string]int{"GET": 200, "POST": 201}[method] {
 						t.Fatalf("REST %s: %d", method, w.Code)
 					}
 				}
-				for _, method := range []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD", "TRACE", "CONNECT", "REPORT", "PROPFIND"} {
-					path := "/api/v1/any"
-					if method == "REPORT" || method == "PROPFIND" {
-						path = "/api/v1/custom"
+				for _, path := range []string{"/any", "/api/v1/any"} {
+					for _, method := range []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD", "TRACE", "CONNECT"} {
+						if w := request(e, method, path); w.Code != 204 {
+							t.Errorf("%s %s: %d", method, path, w.Code)
+						}
 					}
-					if w := request(e, method, path); w.Code != 204 {
-						t.Fatalf("%s %s: %d", method, path, w.Code)
+					if w := request(e, "REPORT", path); w.Code != 404 {
+						t.Errorf("REPORT %s: %d", path, w.Code)
+					}
+				}
+				for _, method := range []string{"REPORT", "PROPFIND"} {
+					if w := request(e, method, "/api/v1/custom"); w.Code != 204 {
+						t.Errorf("%s /api/v1/custom: %d", method, w.Code)
 					}
 				}
 			})
@@ -184,11 +197,11 @@ func TestGroupsAcrossRouters(t *testing.T) {
 					{"nil hook handler", func(_ *Engine, g *RouterGroup) { g.Use(PosBehind, Contains(""), nil) }},
 					{"nil group guard", func(_ *Engine, g *RouterGroup) { g.Group("/v1", nil) }},
 					{"missing handler", func(_ *Engine, g *RouterGroup) { g.GET("/x") }},
-					{"frozen root", func(e *Engine, _ *RouterGroup) { request(e, "GET", "/"); e.Group("/new") }},
-					{"frozen child", func(e *Engine, g *RouterGroup) { request(e, "GET", "/"); g.Group("/new") }},
-					{"frozen guard", func(e *Engine, g *RouterGroup) { request(e, "GET", "/"); g.Guard(noop) }},
-					{"frozen hook", func(e *Engine, g *RouterGroup) { request(e, "GET", "/"); g.Use(PosAhead, Contains(""), noop) }},
-					{"frozen route", func(e *Engine, g *RouterGroup) { request(e, "GET", "/"); g.GET("/new", noop) }},
+					{"frozen root", func(e *Engine, _ *RouterGroup) { e.Prepare(); e.Group("/new") }},
+					{"frozen child", func(e *Engine, g *RouterGroup) { e.Prepare(); g.Group("/new") }},
+					{"frozen guard", func(e *Engine, g *RouterGroup) { e.Prepare(); g.Guard(noop) }},
+					{"frozen hook", func(e *Engine, g *RouterGroup) { e.Prepare(); g.Use(PosAhead, Contains(""), noop) }},
+					{"frozen route", func(e *Engine, g *RouterGroup) { e.Prepare(); g.GET("/new", noop) }},
 				} {
 					t.Run(tc.name, func(t *testing.T) {
 						e := newEngine()
@@ -222,7 +235,7 @@ func TestGroupsAcrossRouters(t *testing.T) {
 								t.Fatalf("chain length %d: panic=%v", count, p)
 							}
 						}()
-						request(e, "GET", "/api/v1/x")
+						e.Prepare()
 					})
 				}
 			})
@@ -231,6 +244,7 @@ func TestGroupsAcrossRouters(t *testing.T) {
 				e.Group("/orgs/:org").GET("/files/*path", func(c *Context) {
 					c.String(200, c.Param("org")+"|"+c.Param("path"))
 				})
+				e.Prepare()
 				path, body := "/orgs/:org/files/*path", "|"
 				if backend.pattern {
 					path, body = "/orgs/acme/files/a/b", "acme|/a/b"
@@ -249,6 +263,7 @@ func TestGroupsAcrossRouters(t *testing.T) {
 				e.Group("/api", func(c *Context) { c.Response().Header().Set("X-Group", "api"); c.Next() }).Group("/v1").GET("/health", func(c *Context) {
 					c.String(http.StatusOK, c.FullPath())
 				})
+				e.Prepare()
 				var wg sync.WaitGroup
 				for range 16 {
 					wg.Add(1)

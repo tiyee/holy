@@ -87,8 +87,6 @@ func (e *Engine) Use(pos HookPos, matcher IMatcher, fn HandlerFunc) {
 }
 
 func (e *Engine) addHook(group *RouterGroup, pos HookPos, matcher IMatcher, fn HandlerFunc) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
 	e.checkMutable()
 	if pos != PosAhead && pos != PosBehind {
 		panic("holy: invalid hook position")

@@ -40,6 +40,7 @@ func testRouterRouting(t *testing.T, newRouter func() IRouter) {
 					c.String(200, strings.Join(values, "|"))
 				})
 			}
+			e.Prepare()
 			for _, tc := range []struct{ path, want string }{
 				{"/", "/"}, {"/users/new", "/users/new"}, {"/users/42", "/users/:id|id=42"},
 				{"/users/new/posts/3", "/users/:id/posts/:post|id=new|post=3"},
@@ -84,6 +85,7 @@ func TestRemoveExtraSlash(t *testing.T) {
 				}
 				return nil
 			})
+			e.Prepare()
 			for _, tc := range []struct {
 				method, path    string
 				code            int
@@ -121,6 +123,7 @@ func TestRemoveExtraSlashParams(t *testing.T) {
 		}
 		c.AbortWithStatus(204)
 	})
+	e.Prepare()
 	if w := request(e, "GET", target); w.Code != 204 {
 		t.Fatal(w.Code)
 	}
@@ -139,6 +142,7 @@ func testRouterMethodsAndRedirects(t *testing.T, newRouter func() IRouter) {
 	e.POST("/users/:name", func(c *Context) { c.String(201, "POST:"+c.Param("name")) })
 	e.OPTIONS("/users/:id", func(c *Context) { c.AbortWithStatus(204) })
 	e.POST("/submit/", func(c *Context) { c.AbortWithStatus(204) })
+	e.Prepare()
 	for _, tc := range []struct {
 		method, path          string
 		code                  int
@@ -166,6 +170,7 @@ func testRouterMethodsAndRedirects(t *testing.T, newRouter func() IRouter) {
 	e2.GET("/path", func(c *Context) { c.String(200, "ok") })
 	e2.POST("/submit/", func(c *Context) { c.AbortWithStatus(204) })
 	e2.GET("/submit", func(c *Context) { c.String(200, "ok") })
+	e2.Prepare()
 	if w := request(e2, "GET", "/path/"); w.Code != 404 || w.Header().Get("Location") != "" {
 		t.Fatalf("disabled redirect: code=%d headers=%v", w.Code, w.Header())
 	}
@@ -200,6 +205,10 @@ func testRouterInvalidRoutes(t *testing.T, newRouter func() IRouter) {
 		{"nil handler", func(e *Engine) { e.GET("/x", nil) }},
 		{"empty method", func(e *Engine) { e.Handle("", "/x", fn) }},
 		{"bad method", func(e *Engine) { e.Handle("GET POST", "/x", fn) }},
+		{"unregistered method", func(e *Engine) { e.Handle("SYNC-V2", "/x", fn) }},
+		{"lowercase method", func(e *Engine) { e.Handle("get", "/x", fn) }},
+		{"reserved wildcard method", func(e *Engine) { e.Handle("*", "/x", fn) }},
+		{"HTTP/2 preface method", func(e *Engine) { e.Handle("PRI", "/x", fn) }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			defer func() {
@@ -229,6 +238,7 @@ func testRouterHooksGroupsAndAbort(t *testing.T, newRouter func() IRouter) {
 	v1.GET("/users/:id", func(c *Context) { order = append(order, "handler:"+c.Param("id")); c.String(200, "ok") })
 	e.Use(PosAhead, Prefix("/api", nil), mark("before"))
 	e.Use(PosBehind, Identical("/api/v1/users/:id"), func(*Context) { order = append(order, "after") })
+	e.Prepare()
 	for range 2 {
 		order = nil
 		w := request(e, "GET", "/api/v1/users/7")
@@ -240,6 +250,7 @@ func testRouterHooksGroupsAndAbort(t *testing.T, newRouter func() IRouter) {
 	e2 := New(WithRouter(newRouter()))
 	e2.Use(PosAhead, Contains("private"), func(c *Context) { c.AbortWithStatus(401); c.Next() })
 	e2.GET("/private/:id", func(*Context) { t.Fatal("aborted handler executed") })
+	e2.Prepare()
 	if w := request(e2, "GET", "/private/1"); w.Code != 401 {
 		t.Fatal(w.Code)
 	}
@@ -257,6 +268,7 @@ func TestFallbackGuardAndFrozenConfiguration(t *testing.T) {
 	e.GET("/users/:id", func(*Context) {})
 	e.NoRoute(func(c *Context) { c.JSON(404, map[string]string{"error": "missing"}) })
 	e.NoMethod(func(c *Context) { c.String(405, "wrong method") })
+	e.Prepare()
 	for _, tc := range []struct {
 		method, path string
 		code         int
@@ -268,7 +280,7 @@ func TestFallbackGuardAndFrozenConfiguration(t *testing.T) {
 	}
 	defer func() {
 		if recover() == nil {
-			t.Error("registration after first request should panic")
+			t.Error("registration after preparation should panic")
 		}
 	}()
 	e.GET("/late", func(*Context) {})
@@ -280,6 +292,7 @@ func TestPanicRecoveryAndJSONFailure(t *testing.T) {
 	e.GET("/written", func(c *Context) { c.String(202, "accepted"); panic("after write") })
 	e.GET("/json", func(c *Context) { c.JSON(200, make(chan int)) }, func(*Context) { t.Error("encoding failure did not abort") })
 	e.GET("/ok", func(c *Context) { c.JSON(200, map[string]string{"ok": "yes"}) })
+	e.Prepare()
 	for _, tc := range []struct {
 		path string
 		code int
@@ -307,6 +320,7 @@ func testRouterConcurrentFirstRequests(t *testing.T, newRouter func() IRouter) {
 		}
 		c.String(200, c.Param("id"))
 	})
+	e.Prepare()
 	var wg sync.WaitGroup
 	for i := range 64 {
 		wg.Go(func() {
@@ -328,10 +342,11 @@ type restExample struct{}
 
 func (restExample) GET(c *Context)  { c.String(200, "get:"+c.Param("id")) }
 func (restExample) POST(c *Context) { c.String(201, "post:"+c.Param("id")) }
-func TestRestAndCustomMethods(t *testing.T) {
+func TestRestAndExtensionMethods(t *testing.T) {
 	e := New()
 	e.Group("/v1").Rest("/users/:id", restExample{})
 	e.Union([]string{"PROPFIND", "REPORT"}, "/custom", func(c *Context) { c.String(200, c.Request().Method) })
+	e.Prepare()
 	for _, tc := range []struct{ method, path, body string }{{"GET", "/v1/users/5", "get:5"}, {"POST", "/v1/users/6", "post:6"}, {"PROPFIND", "/custom", "PROPFIND"}, {"REPORT", "/custom", "REPORT"}} {
 		if w := request(e, tc.method, tc.path); w.Body.String() != tc.body {
 			t.Errorf("%s %s: %q", tc.method, tc.path, w.Body.String())
@@ -421,6 +436,7 @@ func TestCustomRouter(t *testing.T) {
 	e.POST("/exact", func(c *Context) { c.String(201, "created") })
 	// 匹配语义完全由实现决定：替代实现不解析参数路由。
 	e.GET("/param/:id", func(*Context) { t.Error("param route should not match") })
+	e.Prepare()
 	w := request(e, "GET", "/exact")
 	if w.Code != 200 || !reflect.DeepEqual(order, []string{"global", "hook", "handler"}) {
 		t.Fatalf("code=%d order=%v", w.Code, order)

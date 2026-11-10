@@ -40,6 +40,7 @@ func TestFallbackDispatch(t *testing.T) {
 			})
 			e.GET("/known", func(c *Context) { c.AbortWithStatus(200) })
 			e.OPTIONS("/known", func(c *Context) { c.AbortWithStatus(204) })
+			e.Prepare()
 			for _, tc := range []struct {
 				method, path, selectName string
 				code                     int
@@ -81,6 +82,7 @@ func TestFallbackRegistration(t *testing.T) {
 		}()
 		e.Fallback(match, nil)
 	}()
+	e.Prepare()
 	if w := request(e, "GET", "/missing"); w.Code != 404 {
 		t.Fatalf("partial registration: status %d", w.Code)
 	}
@@ -98,6 +100,7 @@ func TestFallbackConcurrentHandlers(t *testing.T) {
 		path := r.URL.Path
 		return func(c *Context) { c.String(200, path) }
 	})
+	e.Prepare()
 	var wg sync.WaitGroup
 	for i := range 32 {
 		wg.Go(func() {

@@ -27,9 +27,6 @@ func TestQueryOwnsRawBytes(t *testing.T) {
 				},
 			}
 			m := New(&rawBytesModel{}).SetRDb(openTestDB(t, state))
-			if binds := Binds(m.Record); binds[0] != &m.Record.Value || binds[1] != &m.Record.Optional || binds[2] != &m.Record.Nullable {
-				t.Fatal("Binds 应返回原字段地址")
-			}
 			var rows []*rawBytesModel
 			var err error
 			switch method {
@@ -148,12 +145,12 @@ func TestScannerResultsAreIndependent(t *testing.T) {
 						t.Fatal("modifying the first row changed the second")
 					}
 					rows[0].Template["keep"] = "shared"
-					if m.Record.Template["keep"] != "shared" || rows[1].Template["keep"] != "shared" {
+					if m.record.Template["keep"] != "shared" || rows[1].Template["keep"] != "shared" {
 						t.Fatal("unmapped template fields lost shallow-copy behavior")
 					}
 				}
-				if m.Record.Attrs["name"] != "template" || m.Record.Tags[0] != "template" || m.Record.Document.Values["name"] != "template" {
-					t.Fatalf("query mutated the template: %+v", m.Record)
+				if m.record.Attrs["name"] != "template" || m.record.Tags[0] != "template" || m.record.Document.Values["name"] != "template" {
+					t.Fatalf("query mutated the template: %+v", m.record)
 				}
 			})
 		}

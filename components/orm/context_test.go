@@ -11,7 +11,7 @@ import (
 func TestDatabaseOperationsUseContext(t *testing.T) {
 	type contextKey struct{}
 	ctx := context.WithValue(context.Background(), contextKey{}, "request")
-	for name, operation := range databaseOperations[*legacyMethodModel]() {
+	for name, operation := range databaseOperations[*testRecord]() {
 		t.Run(name, func(t *testing.T) {
 			state := &testDatabase{
 				columns: []string{"id", "name", "score"},
@@ -21,10 +21,9 @@ func TestDatabaseOperationsUseContext(t *testing.T) {
 				state.columns, state.data = []string{"n"}, [][]driver.Value{{int64(1)}}
 			}
 			db := openTestDB(t, state)
-			original := New(&legacyMethodModel{}).SetRDb(db).SetWDb(db)
-			original.Fields()
+			original := New(&testRecord{}).SetRDb(db).SetWDb(db)
 			bound := original.WithContext(ctx)
-			if bound == original || bound.Record != original.Record || bound.meta != original.meta || original.context() != context.Background() {
+			if bound == original || bound.record != original.record || bound.meta != original.meta || original.context() != context.Background() {
 				t.Fatal("WithContext did not preserve the original ORM")
 			}
 			if err := operation(bound); err != nil {
@@ -50,11 +49,11 @@ func TestDatabaseOperationsRespectCancellation(t *testing.T) {
 			want = context.DeadlineExceeded
 		}
 		cancel()
-		for name, operation := range databaseOperations[*legacyMethodModel]() {
+		for name, operation := range databaseOperations[*testRecord]() {
 			t.Run(want.Error()+"/"+name, func(t *testing.T) {
 				state := &testDatabase{}
 				db := openTestDB(t, state)
-				m := New(&legacyMethodModel{}).SetRDb(db).SetWDb(db).WithContext(ctx)
+				m := New(&testRecord{}).SetRDb(db).SetWDb(db).WithContext(ctx)
 				if err := operation(m); !errors.Is(err, want) {
 					t.Fatalf("error = %v, want %v", err, want)
 				}
@@ -76,9 +75,9 @@ func TestContextAndTransactionCompose(t *testing.T) {
 	defer tx.Rollback()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	for _, bound := range []*ORM[*legacyMethodModel]{
-		New(&legacyMethodModel{}).SetRDb(tx).SetWDb(tx).WithContext(ctx),
-		New(&legacyMethodModel{}).WithContext(ctx).SetRDb(tx).SetWDb(tx),
+	for _, bound := range []*ORM[*testRecord]{
+		New(&testRecord{}).SetRDb(tx).SetWDb(tx).WithContext(ctx),
+		New(&testRecord{}).WithContext(ctx).SetRDb(tx).SetWDb(tx),
 	} {
 		if _, err := bound.Count("", nil); err != nil {
 			t.Fatal(err)

@@ -8,14 +8,14 @@ import (
 )
 
 func BenchmarkMetadata(b *testing.B) {
-	typ := reflect.TypeFor[*legacyMethodModel]()
+	typ := reflect.TypeFor[*testRecord]()
 	b.Run("cached", func(b *testing.B) {
-		if _, err := loadMetadata(typ); err != nil {
+		if _, err := loadMetadata(typ, JSONTags); err != nil {
 			b.Fatal(err)
 		}
 		b.ReportAllocs()
 		for b.Loop() {
-			if _, err := loadMetadata(typ); err != nil {
+			if _, err := loadMetadata(typ, JSONTags); err != nil {
 				b.Fatal(err)
 			}
 		}
@@ -23,7 +23,7 @@ func BenchmarkMetadata(b *testing.B) {
 	b.Run("uncached", func(b *testing.B) {
 		b.ReportAllocs()
 		for b.Loop() {
-			if _, err := parseMetadata(typ); err != nil {
+			if _, err := parseMetadata(typ, JSONTags); err != nil {
 				b.Fatal(err)
 			}
 		}
@@ -37,7 +37,7 @@ func BenchmarkRead64Rows(b *testing.B) {
 	}
 	db := sql.OpenDB(testConnector{state})
 	defer db.Close()
-	m := New(&legacyMethodModel{}).SetRDb(db)
+	m := New(&testRecord{}).SetRDb(db)
 	b.ReportAllocs()
 	for b.Loop() {
 		rows, err := m.Rows("", nil)

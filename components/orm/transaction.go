@@ -6,67 +6,45 @@ import (
 	"errors"
 )
 
-func finishTransaction(tx *sql.Tx, fn func() error) (err error) {
-	defer func() {
-		if rbErr := tx.Rollback(); rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) {
-			err = errors.Join(err, rbErr)
-		}
-	}()
-	if err = fn(); err != nil {
-		return err
+// BeginTx 供上层在注册的写库显式开启事务，opts 为 nil 时使用默认事务选项。
+// ctx 用于等待连接和事务生命周期。调用方负责提交或回滚，并可通过 SetDB 注入事务。
+func BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error) {
+	if ctx == nil {
+		return nil, ErrInvalidContext
 	}
-	return tx.Commit()
+	write := registeredDatabases().write
+	if write == nil {
+		return nil, ErrNoDatabase
+	}
+	return write.BeginTx(ctx, opts)
 }
 
-// TransactionBeginner 允许事务入口注入独立连接池或测试实现。
-type TransactionBeginner interface {
-	BeginTx(context.Context, *sql.TxOptions) (*sql.Tx, error)
+// Begin 使用默认事务选项从注册的写库开启事务。
+func Begin(ctx context.Context) (*sql.Tx, error) {
+	return BeginTx(ctx, nil)
 }
 
-// WithinTransaction 供 Repository 在指定连接上编排事务；错误和 panic 回滚，成功提交。
-// ORM 默认连接由初始化注册；回调通过 SetRDb/SetWDb 将实例读写切换到同一事务。
-func WithinTransaction(ctx context.Context, db TransactionBeginner, opts *sql.TxOptions, fn func(*sql.Tx) error) error {
-	if ctx == nil || fn == nil {
-		return ErrInvalidTransaction
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if isNil(db) {
-		return ErrNoDatabase
-	}
-	tx, err := db.BeginTx(ctx, opts)
-	if err != nil {
-		return err
-	}
-	return finishTransaction(tx, func() error { return fn(tx) })
-}
-
-// AutoTransaction 供 Repository 使用 RegisterDB 注册的写库编排事务。
-// 使用 context.Background()，回调将事务句柄作为各单表 ORM 的读写连接注入。
-func AutoTransaction(trans func(IDBHandle) error) error {
+// AutoTransaction 使用后台 Context 在注册的写库开启事务，并将事务句柄传给 trans。
+// 回调可用 SetDB 绑定 ORM 实例。成功时提交，错误或 panic 时回滚，panic 继续传播。
+func AutoTransaction(trans func(db IDBHandle) error) (err error) {
 	if trans == nil {
 		return ErrInvalidTransaction
 	}
-	return AutoTransactionContext(context.Background(), func(tx *sql.Tx) error { return trans(tx) })
-}
-
-// AutoTransactionContext 供 Repository 使用注册的写库编排事务，并向 BeginTx 传递 ctx。
-// 回调中的 ORM 通过 SetRDb/SetWDb 切换到同一事务，并通过 WithContext(ctx) 传递请求 Context。
-func AutoTransactionContext(ctx context.Context, trans func(*sql.Tx) error) error {
-	if ctx == nil || trans == nil {
-		return ErrInvalidTransaction
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	_, write := registeredDatabases()
-	if isNil(write) {
+	write := registeredDatabases().write
+	if write == nil {
 		return ErrNoDatabase
 	}
-	db, ok := write.(TransactionBeginner)
-	if !ok {
-		return ErrTransactionUnsupported
+	tx, err := write.Begin()
+	if err != nil {
+		return err
 	}
-	return WithinTransaction(ctx, db, nil, trans)
+	defer func() {
+		if rollbackErr := tx.Rollback(); rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
+			err = errors.Join(err, rollbackErr)
+		}
+	}()
+	if err = trans(tx); err != nil {
+		return err
+	}
+	return tx.Commit()
 }

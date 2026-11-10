@@ -19,7 +19,7 @@ func validateBatch[T ITable](rows []T, meta *metadata) error {
 
 // SavesInBatches 按 batchSize 和 MySQL 参数上限分批插入，首次写入前校验全部记录。
 // 出错时返回已完成批次的 RowsAffected 累计值，不负责开启或结束事务。
-// 跨批次原子性由 Repository 通过 AutoTransaction 编排，并将事务注入 ORM。
+// 需要跨批次原子性时，由上层管理事务，并通过 SetWDb 注入 *sql.Tx。
 func (c *ORM[T]) SavesInBatches(rows []T, batchSize int) (int64, error) {
 	if batchSize < 1 {
 		return 0, ErrInvalidBatchSize
@@ -27,10 +27,10 @@ func (c *ORM[T]) SavesInBatches(rows []T, batchSize int) (int64, error) {
 	if len(rows) == 0 {
 		return 0, nil
 	}
-	meta, err := c.findMeta()
-	if err != nil {
+	if err := c.validateModel(); err != nil {
 		return 0, err
 	}
+	meta := c.meta
 	if _, err := c.insertQuery(meta); err != nil {
 		return 0, err
 	}

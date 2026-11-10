@@ -3,7 +3,6 @@ package orm
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
 	"os"
 	"testing"
@@ -20,13 +19,8 @@ type mysqlIntegrationModel struct {
 	table  string
 }
 
-func (m *mysqlIntegrationModel) TableName() string {
-	if m.table != "" {
-		return m.table
-	}
-	return "orm_v2_integration"
-}
-func (*mysqlIntegrationModel) Pk() string { return "id" }
+func (m *mysqlIntegrationModel) TableName() string { return m.table }
+func (*mysqlIntegrationModel) Pk() string          { return "id" }
 
 // Requires a disposable MySQL schema and CREATE/DROP TABLE privileges.
 // The DSN is read from the environment and is never logged.
@@ -51,7 +45,7 @@ func mysqlIntegrationSetup(t *testing.T) (context.Context, *sql.DB, *ORM[*mysqlI
 	if err := db.PingContext(ctx); err != nil {
 		t.Fatal(err)
 	}
-	table := fmt.Sprintf("orm_v2_test_%d", time.Now().UnixNano())
+	table := fmt.Sprintf("orm_test_%d", time.Now().UnixNano())
 	_, err = db.ExecContext(ctx, "CREATE TABLE "+quoteIdentifier(table)+" (id BIGINT PRIMARY KEY AUTO_INCREMENT, name VARCHAR(100) NOT NULL UNIQUE, amount DECIMAL(12,2) NULL, score BIGINT NOT NULL) ENGINE=InnoDB")
 	if err != nil {
 		t.Fatal(err)
@@ -69,15 +63,15 @@ func mysqlIntegrationSetup(t *testing.T) (context.Context, *sql.DB, *ORM[*mysqlI
 
 func TestMySQLIntegration(t *testing.T) {
 	ctx, _, m := mysqlIntegrationSetup(t)
-	m.Record.Name = "one"
-	m.Record.Amount = sql.NullString{String: "12.50", Valid: true}
-	m.Record.Score = 4
+	m.record.Name = "one"
+	m.record.Amount = sql.NullString{String: "12.50", Valid: true}
+	m.record.Score = 4
 	id, err := m.Save()
-	if err != nil || id <= 0 || m.Record.ID != 0 {
+	if err != nil || id <= 0 || m.record.ID != 0 {
 		t.Fatalf("Save = %d, %v", id, err)
 	}
 	row, err := m.Row("id=?", []any{id})
-	if err != nil || row != m.Record || row.Amount.String != "12.50" {
+	if err != nil || row != m.record || row.Amount.String != "12.50" {
 		t.Fatalf("Row = %+v, %v", row, err)
 	}
 	if n, err := m.Saves([]*mysqlIntegrationModel{{Name: "two", Score: 1}, {Name: "three", Score: 2}}); err != nil || n != 2 {
@@ -90,14 +84,14 @@ func TestMySQLIntegration(t *testing.T) {
 		t.Fatalf("Sum = %d, %v", n, err)
 	}
 	rows, err := m.Rows("id>=?", []any{id})
-	if err != nil || len(rows) != 3 || rows[0] == m.Record || rows[0] == rows[1] || rows[0].table != m.Record.table {
+	if err != nil || len(rows) != 3 || rows[0] == m.record || rows[0] == rows[1] || rows[0].table != m.record.table {
 		t.Fatalf("Rows = %+v, %v", rows, err)
 	}
 	page, err := m.Limit("", nil, 1, 1, "id asc")
 	if err != nil || len(page) != 1 || page[0].Name != "two" {
 		t.Fatalf("Limit = %+v, %v", page, err)
 	}
-	m.Record.Name, m.Record.Score, m.Record.Amount = "updated", 0, sql.NullString{}
+	m.record.Name, m.record.Score, m.record.Amount = "updated", 0, sql.NullString{}
 	if _, err := m.Update(id); err != nil {
 		t.Fatal(err)
 	}
@@ -108,22 +102,19 @@ func TestMySQLIntegration(t *testing.T) {
 	if _, err := m.UpdateByPk(map[string]any{"score": 9}, id); err != nil {
 		t.Fatal(err)
 	}
-	rollback := errors.New("expected rollback")
-	err = AutoTransactionContext(ctx, func(tx *sql.Tx) error {
-		bound := New(&mysqlIntegrationModel{table: m.Record.table}).SetRDb(tx).SetWDb(tx).WithContext(ctx)
-		if _, err := bound.UpdateByPk(map[string]any{"name": "rolled_back"}, id); err != nil {
-			return err
-		}
-		row, err := bound.Row("id=?", []any{id})
-		if err != nil {
-			return err
-		}
-		if row.Name != "rolled_back" {
-			return errors.New("transaction read did not see its write")
-		}
-		return rollback
-	})
-	if !errors.Is(err, rollback) {
+	tx, err := BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	bound := New(&mysqlIntegrationModel{table: m.record.table}).SetDB(tx).WithContext(ctx)
+	if _, err := bound.UpdateByPk(map[string]any{"name": "rolled_back"}, id); err != nil {
+		t.Fatal(err)
+	}
+	if row, err := bound.Row("id=?", []any{id}); err != nil || row.Name != "rolled_back" {
+		t.Fatalf("transaction read did not see its write: %+v, %v", row, err)
+	}
+	if err := tx.Rollback(); err != nil {
 		t.Fatal(err)
 	}
 	row, err = m.Row("id=?", []any{id})
@@ -139,8 +130,8 @@ func TestMySQLIntegration(t *testing.T) {
 }
 
 func TestMySQLIntegrationBatchTransactions(t *testing.T) {
-	_, _, m := mysqlIntegrationSetup(t)
-	m.Record.Name = "existing"
+	ctx, db, m := mysqlIntegrationSetup(t)
+	m.record.Name = "existing"
 	if _, err := m.Save(); err != nil {
 		t.Fatal(err)
 	}
@@ -150,19 +141,16 @@ func TestMySQLIntegrationBatchTransactions(t *testing.T) {
 	if n, err := m.Count("name=?", []any{"partial"}); err != nil || n != 0 {
 		t.Fatalf("failed multi-row insert = %d, %v", n, err)
 	}
-	rollback := errors.New("rollback successful batch")
-	err := AutoTransaction(func(tx IDBHandle) error {
-		n, err := New(&mysqlIntegrationModel{table: m.Record.table}).SetWDb(tx).
-			Saves([]*mysqlIntegrationModel{{Name: "rolled_back"}, {Name: "also_rolled_back"}})
-		if err != nil {
-			return err
-		}
-		if n != 2 {
-			return fmt.Errorf("Saves affected %d rows, want 2", n)
-		}
-		return rollback
-	})
-	if !errors.Is(err, rollback) {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	bound := New(&mysqlIntegrationModel{table: m.record.table}).SetWDb(tx).WithContext(ctx)
+	if n, err := bound.Saves([]*mysqlIntegrationModel{{Name: "rolled_back"}, {Name: "also_rolled_back"}}); n != 2 || err != nil {
+		t.Fatalf("transaction batch = %d, %v", n, err)
+	}
+	if err := tx.Rollback(); err != nil {
 		t.Fatal(err)
 	}
 	if n, err := m.Count("name in (?,?)", []any{"rolled_back", "also_rolled_back"}); err != nil || n != 0 {
@@ -173,12 +161,12 @@ func TestMySQLIntegrationBatchTransactions(t *testing.T) {
 func TestMySQLIntegrationChunkedTransactions(t *testing.T) {
 	ctx, _, m := mysqlIntegrationSetup(t)
 	m = m.WithContext(ctx)
-	m.Record.Name = "existing"
+	m.record.Name = "existing"
 	if _, err := m.Save(); err != nil {
 		t.Fatal(err)
 	}
-	err := AutoTransactionContext(ctx, func(tx *sql.Tx) error {
-		bound := New(&mysqlIntegrationModel{table: m.Record.table}).SetRDb(tx).SetWDb(tx).WithContext(ctx)
+	err := AutoTransaction(func(handle IDBHandle) error {
+		bound := New(&mysqlIntegrationModel{table: m.record.table}).SetDB(handle).WithContext(ctx)
 		n, err := bound.SavesInBatches([]*mysqlIntegrationModel{
 			{Name: "first_batch"}, {Name: "second_batch"}, {Name: "existing"},
 		}, 1)

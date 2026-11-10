@@ -3,7 +3,6 @@ package redis
 import (
 	"context"
 	"errors"
-	"sync/atomic"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -15,23 +14,23 @@ var ErrNoClient = errors.New("redis: client is not configured")
 type Cache struct {
 	client     *redis.Client
 	ctx        context.Context
-	defaultExp *atomic.Int64
+	defaultExp time.Duration
 }
 
 var _ cache.ICacheE = (*Cache)(nil)
 var _ cache.ICacheContext = (*Cache)(nil)
 
-// NewCache 借用连接，生命周期由调用方管理；请求 Context 通过每次操作传入。
-func NewCache(client *redis.Client) *Cache { return NewRedisHandle(context.Background(), client) }
+// NewCache 借用连接并使用 24 小时的默认过期时间，连接由调用方管理。
+func NewCache(client *redis.Client) *Cache { return NewCacheWithExpiry(client, 24*time.Hour) }
+
+// NewCacheWithExpiry 在构造时指定默认过期时间，0 表示不过期。
+func NewCacheWithExpiry(client *redis.Client, exp time.Duration) *Cache {
+	return &Cache{client: client, ctx: context.Background(), defaultExp: exp}
+}
 
 // NewRedisHandle 保留绑定 Context 的兼容入口，新代码优先使用 NewCache。
 func NewRedisHandle(ctx context.Context, client *redis.Client) *Cache {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	exp := new(atomic.Int64)
-	exp.Store(int64(24 * time.Hour))
-	return &Cache{client: client, ctx: ctx, defaultExp: exp}
+	return NewCache(client).WithContext(ctx)
 }
 
 // WithContext 返回请求专用视图，不会修改共享 Cache 的 Context。
@@ -39,9 +38,11 @@ func (r *Cache) WithContext(ctx context.Context) *Cache {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return &Cache{client: r.client, ctx: ctx, defaultExp: r.defaultExp}
+	view := *r
+	view.ctx = ctx
+	return &view
 }
-func (r *Cache) SetDefaultExp(exp time.Duration) { r.defaultExp.Store(int64(exp)) }
+
 func (r *Cache) validate(ctx context.Context) error {
 	if ctx == nil {
 		return errors.New("redis: nil context")
@@ -73,11 +74,7 @@ func (r *Cache) SetContext(ctx context.Context, key string, value []byte) error 
 	if err := r.validate(ctx); err != nil {
 		return err
 	}
-	expiration := 24 * time.Hour
-	if r.defaultExp != nil {
-		expiration = time.Duration(r.defaultExp.Load())
-	}
-	return r.SetEContext(ctx, key, value, expiration)
+	return r.client.Set(ctx, key, value, r.defaultExp).Err()
 }
 func (r *Cache) DeleteContext(ctx context.Context, key string) error {
 	if err := r.validate(ctx); err != nil {

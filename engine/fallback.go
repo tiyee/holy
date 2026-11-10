@@ -43,8 +43,6 @@ func WithFallback(resolvers ...FallbackFunc) IEnginOpt {
 
 // Fallback 在引擎冻结前追加选择器，按调用顺序安装到最终选定的路由器。
 func (e *Engine) Fallback(resolvers ...FallbackFunc) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
 	e.checkMutable()
 	e.pendingFallbacks.AddFallback(resolvers...)
 }

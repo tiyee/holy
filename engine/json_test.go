@@ -46,6 +46,7 @@ func TestJSONBindingLimitsAndStrictness(t *testing.T) {
 				}
 				c.JSON(200, value)
 			})
+			e.Prepare()
 			req := httptest.NewRequest("POST", "/", strings.NewReader(tt.body))
 			if tt.name == "chunked oversized" {
 				req.ContentLength = -1
@@ -83,6 +84,7 @@ func TestCustomJSONAndEnvelope(t *testing.T) {
 		}
 		c.AjaxSuccess("ok", value)
 	})
+	e.Prepare()
 	w := httptest.NewRecorder()
 	e.ServeHTTP(w, httptest.NewRequest("POST", "/", strings.NewReader("hello")))
 	var got map[string]map[string]any
@@ -125,19 +127,40 @@ func TestJSONArgsValidationOrder(t *testing.T) {
 }
 
 func TestRequestBodyLimitAlsoAppliesToRawReaders(t *testing.T) {
+	for _, method := range []string{http.MethodGet, http.MethodPost} {
+		t.Run(method, func(t *testing.T) {
+			e := New()
+			e.MaxBodyBytes = 8
+			e.Handle(method, "/", func(c *Context) {
+				_, err := io.ReadAll(c.Request().Body)
+				var tooLarge *http.MaxBytesError
+				if !errors.As(err, &tooLarge) {
+					t.Errorf("raw body limit missing: %v", err)
+				}
+				c.AbortWithStatus(413)
+			})
+			e.Prepare()
+			w := httptest.NewRecorder()
+			e.ServeHTTP(w, httptest.NewRequest(method, "/", strings.NewReader("more than eight bytes")))
+			if w.Code != 413 {
+				t.Fatal(w.Code)
+			}
+		})
+	}
+}
+
+func TestGETPreservesNoBody(t *testing.T) {
 	e := New()
-	e.MaxBodyBytes = 8
-	e.POST("/", func(c *Context) {
-		_, err := io.ReadAll(c.Request().Body)
-		var tooLarge *http.MaxBytesError
-		if !errors.As(err, &tooLarge) {
-			t.Errorf("raw body limit missing: %v", err)
+	e.GET("/", func(c *Context) {
+		if c.Request().Body != http.NoBody {
+			t.Error("expected http.NoBody in handler")
 		}
-		c.AbortWithStatus(413)
+		c.AbortWithStatus(http.StatusNoContent)
 	})
+	e.Prepare()
 	w := httptest.NewRecorder()
-	e.ServeHTTP(w, httptest.NewRequest("POST", "/", strings.NewReader("more than eight bytes")))
-	if w.Code != 413 {
+	e.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", nil))
+	if w.Code != http.StatusNoContent {
 		t.Fatal(w.Code)
 	}
 }

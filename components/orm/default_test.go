@@ -1,55 +1,66 @@
 package orm
 
 import (
-	"context"
 	"database/sql"
 	"database/sql/driver"
 	"errors"
-	"sync"
 	"testing"
 )
 
-func registerTestDB(t *testing.T, read, write IDBHandle) {
+func registerTestDB(t *testing.T, read, write *sql.DB) {
 	t.Helper()
-	previousRead, previousWrite := registeredDatabases()
-	t.Cleanup(func() { RegisterDB(previousRead, previousWrite) })
-	RegisterDB(read, write)
+	resetTestDB(t)
+	if err := RegisterDB(read, write); err != nil {
+		t.Fatal(err)
+	}
 }
 
-func TestRegisteredDatabaseRoutingAndReplacement(t *testing.T) {
+func resetTestDB(t *testing.T) {
+	t.Helper()
+	previousState := defaultState.Swap(initUnstarted)
+	previousDatabases := defaultDatabases
+	defaultDatabases = databasePair{}
+	t.Cleanup(func() {
+		defaultDatabases = previousDatabases
+		defaultState.Store(previousState)
+	})
+}
+
+func TestRegisteredDatabaseRoutingAndImmutability(t *testing.T) {
 	readState := &testDatabase{columns: []string{"id", "name", "score"}, data: [][]driver.Value{{int64(1), "replica", int64(2)}}}
 	writeState := &testDatabase{}
 	read, write := openTestDB(t, readState), openTestDB(t, writeState)
-	registerTestDB(t, read, write)
-	original := New(&legacyMethodModel{})
+	resetTestDB(t)
+	if err := RegisterDB(nil, nil); !errors.Is(err, ErrNoDatabase) {
+		t.Fatalf("empty registration = %v, want ErrNoDatabase", err)
+	}
+	if state := defaultState.Load(); state != initFailed {
+		t.Fatalf("空连接池注册后状态 = %d，预期失败", state)
+	}
+	if err := RegisterDB(read, write); err != nil {
+		t.Fatal(err)
+	}
+	original := New(&testRecord{})
 	if _, err := original.Row("", nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := original.Save(); err != nil {
 		t.Fatal(err)
 	}
-	if len(readState.calls) != 1 || len(writeState.calls) != 1 || original.Record.Name != "replica" {
+	if len(readState.calls) != 1 || len(writeState.calls) != 1 || original.record.Name != "replica" {
 		t.Fatal("registered read/write routing changed")
 	}
 
-	replacementState := &testDatabase{}
-	replacement := openTestDB(t, replacementState)
-	RegisterDB(replacement, replacement)
-	if _, err := New(&legacyMethodModel{}).Save(); err != nil {
-		t.Fatal(err)
+	replacement := openTestDB(t, &testDatabase{})
+	if err := RegisterDB(replacement, replacement); !errors.Is(err, ErrDatabaseAlreadyRegistered) {
+		t.Fatalf("repeat registration = %v, want ErrDatabaseAlreadyRegistered", err)
 	}
-	if err := AutoTransaction(func(tx IDBHandle) error {
-		_, err := tx.ExecContext(context.Background(), "UPDATE records SET score=1")
-		return err
-	}); err != nil {
-		t.Fatal(err)
+	if err := RegisterDB(nil, nil); !errors.Is(err, ErrNoDatabase) {
+		t.Fatalf("empty registration = %v, want ErrNoDatabase", err)
 	}
-	if replacementState.commits != 1 || len(replacementState.calls) != 2 || writeState.commits != 0 {
-		t.Fatal("new operations did not use the replacement database")
-	}
-	RegisterDB(nil, nil)
-	if _, err := original.Save(); err != nil || len(writeState.calls) != 2 {
-		t.Fatalf("existing instance lost its database snapshot: %v", err)
+	fresh := New(&testRecord{})
+	if fresh.rdb != read || fresh.wdb != write {
+		t.Fatal("registration changed the global database pair")
 	}
 	for _, db := range []*sql.DB{read, write, replacement} {
 		if err := db.Ping(); err != nil {
@@ -62,59 +73,59 @@ func TestRegisteredDatabaseOverridesAndValidation(t *testing.T) {
 	globalState, localState := &testDatabase{}, &testDatabase{}
 	global, local := openTestDB(t, globalState), openTestDB(t, localState)
 	registerTestDB(t, global, global)
-	m := New(&legacyMethodModel{}).SetRDb(local).SetWDb(local)
+	m := New(&testRecord{}).SetDB(local)
 	if _, err := m.Save(); err != nil {
 		t.Fatal(err)
 	}
 	if len(localState.calls) != 1 || len(globalState.calls) != 0 {
 		t.Fatal("instance database was overridden by global registration")
 	}
-	unconfigured := New(&legacyMethodModel{}).SetRDb(nil).SetWDb(nil)
+	if fresh := New(&testRecord{}); fresh.rdb != global || fresh.wdb != global {
+		t.Fatal("instance override changed the global database pair")
+	}
+	unconfigured := New(&testRecord{}).SetRDb(nil).SetWDb(nil)
 	if _, err := unconfigured.Count("", nil); !errors.Is(err, ErrNoDatabase) {
 		t.Fatal(err)
 	}
 	if _, err := unconfigured.Save(); !errors.Is(err, ErrNoDatabase) {
 		t.Fatal(err)
 	}
-	var nilDB *sql.DB
-	for _, write := range []IDBHandle{nil, nilDB, contextOnly{local}} {
-		RegisterDB(global, write)
-		want := ErrNoDatabase
-		if !isNil(write) {
-			want = ErrTransactionUnsupported
-		} else if _, err := New(&legacyMethodModel{}).Save(); !errors.Is(err, want) {
-			t.Fatal(err)
+	t.Run("missing read pool", func(t *testing.T) {
+		registerTestDB(t, nil, global)
+		if _, err := New(&testRecord{}).Count("", nil); !errors.Is(err, ErrNoDatabase) {
+			t.Fatalf("Count with no read pool = %v, want ErrNoDatabase", err)
 		}
-		if err := AutoTransactionContext(context.Background(), func(*sql.Tx) error {
-			t.Fatal("invalid database invoked callback")
-			return nil
-		}); !errors.Is(err, want) {
-			t.Fatalf("transaction error = %v, want %v", err, want)
+	})
+	t.Run("missing write pool", func(t *testing.T) {
+		registerTestDB(t, global, nil)
+		if _, err := New(&testRecord{}).Save(); !errors.Is(err, ErrNoDatabase) {
+			t.Fatalf("Save with no write pool = %v, want ErrNoDatabase", err)
 		}
-	}
+	})
 }
 
 func TestConcurrentDatabaseRegistration(t *testing.T) {
 	first, second := openTestDB(t, &testDatabase{}), openTestDB(t, &testDatabase{})
-	registerTestDB(t, first, first)
-	var wg sync.WaitGroup
-	for i := 0; i < 8; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			for j := 0; j < 500; j++ {
-				db := first
-				if (i+j)%2 == 0 {
-					db = second
-				}
-				RegisterDB(db, db)
-				m := New(&legacyMethodModel{})
-				if m.rdb != m.wdb || (m.rdb != first && m.rdb != second) {
-					t.Error("read/write registration snapshot was torn")
-					return
-				}
-			}
-		}(i)
+	resetTestDB(t)
+	type result struct {
+		pair databasePair
+		err  error
 	}
-	wg.Wait()
+	results := make(chan result, 2)
+	for _, pair := range []databasePair{{read: first, write: second}, {read: second, write: first}} {
+		go func() {
+			results <- result{pair: pair, err: RegisterDB(pair.read, pair.write)}
+		}()
+	}
+	winner, other := <-results, <-results
+	if winner.err != nil {
+		winner, other = other, winner
+	}
+	if winner.err != nil || !errors.Is(other.err, ErrDatabaseAlreadyRegistered) {
+		t.Fatalf("registration results = %v, %v, want one success and one duplicate", winner.err, other.err)
+	}
+	m := New(&testRecord{})
+	if m.rdb != winner.pair.read || m.wdb != winner.pair.write {
+		t.Fatal("read/write registration snapshot differs from the successful pair")
+	}
 }

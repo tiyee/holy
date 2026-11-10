@@ -151,6 +151,8 @@ slog 生态互通，每个子目录一个主题，`go run ./examples/<名称>` �
 | `FatalHook` | Fatal（及开发模式 DPanic）退出前、Sync 之前的回调 | - |
 | `InitialFields` | 全局公共字段，预编码缓存 | - |
 
+启用文件滚动时，运行账号需要能在日志目录中重命名旧文件并创建新文件。只有日志文件本身可写时，重命名失败后仍可能继续追加到原文件，且该失败不会作为写入错误返回。`MaxSize` 是触发滚动的阈值，部署时应使用服务运行账号验证备份文件可以生成。
+
 运行时动态调级：`log.SetLevel(log.LevelError)` 或 `logger.LevelVar().Set(...)`。
 
 编码约定（对齐 zap）：`time.Duration` 以秒的浮点数输出；`[]byte` 输出 base64

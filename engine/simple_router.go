@@ -2,16 +2,19 @@ package engine
 
 import (
 	"iter"
+	"net/http"
 	"slices"
 	"strings"
 )
 
 // SimpleRouter 将路由按 method、path 排序存入一个 slice，通过二分进行精确匹配。
 // 不解析路径参数、通配符或正则表达式，也不修改 Lookup 的参数切片。
-// 零值可用；注册期间不支持并发，注册完成后可并发查找和遍历。
+// 零值可用，首次使用后不可复制。注册须串行完成，之后可并发查找和遍历。
+// 所属引擎启动后，注册方法会 panic。
 type SimpleRouter struct {
-	Fallbacks
-	routes []simpleRoute
+	frozen    bool
+	fallbacks Fallbacks
+	routes    []simpleRoute
 }
 
 type simpleRoute struct {
@@ -22,6 +25,7 @@ type simpleRoute struct {
 func NewSimpleRouter() *SimpleRouter { return &SimpleRouter{} }
 
 func (r *SimpleRouter) Insert(method, path string, route *Route) {
+	r.checkMutable()
 	if !validMethod(method) {
 		panic("holy: invalid HTTP method " + method)
 	}
@@ -35,6 +39,27 @@ func (r *SimpleRouter) Insert(method, path string, route *Route) {
 		panic("holy: duplicate route " + method + " " + path)
 	}
 	r.routes = slices.Insert(r.routes, i, entry)
+}
+
+// AddFallback 在启动前按顺序追加选择器。
+func (r *SimpleRouter) AddFallback(resolvers ...FallbackFunc) {
+	r.checkMutable()
+	r.fallbacks.AddFallback(resolvers...)
+}
+
+// Fallback 返回首个接管请求的处理器。
+func (r *SimpleRouter) Fallback(req *http.Request) HandlerFunc {
+	return r.fallbacks.Fallback(req)
+}
+
+func (r *SimpleRouter) freeze() {
+	r.frozen = true
+}
+
+func (r *SimpleRouter) checkMutable() {
+	if r.frozen {
+		panic("holy: router is frozen at startup")
+	}
 }
 
 func compareSimpleRoute(a, b simpleRoute) int {

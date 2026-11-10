@@ -3,6 +3,7 @@ package engine
 import (
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"testing"
 )
@@ -75,10 +76,11 @@ func BenchmarkRouterServeHTTP(b *testing.B) {
 				e.HandleMethodNotAllowed = allow405
 				e.RemoveExtraSlash = tc.removeExtraSlash
 				for _, path := range []string{"/users/new", "/users/:id/posts/:post", "/files/*path"} {
-					e.Any(path, func(*Context) {})
+					e.AnyMethod(path, func(*Context) {})
 				}
 				e.NoRoute(func(*Context) {})
 				e.NoMethod(func(*Context) {})
+				e.Prepare()
 				req := &http.Request{Method: tc.method, URL: &url.URL{Path: tc.path}}
 				w := &routerBenchmarkWriter{header: make(http.Header)}
 				e.ServeHTTP(w, req)
@@ -92,11 +94,25 @@ func BenchmarkRouterServeHTTP(b *testing.B) {
 	}
 }
 
+func BenchmarkRouterGETNoBody(b *testing.B) {
+	e := New()
+	e.GET("/users/:id", func(*Context) {})
+	e.Prepare()
+	req := httptest.NewRequest(http.MethodGet, "/users/42", nil)
+	w := &routerBenchmarkWriter{header: make(http.Header)}
+	e.ServeHTTP(w, req)
+	b.ReportAllocs()
+	for b.Loop() {
+		req.Body = http.NoBody
+		e.ServeHTTP(w, req)
+	}
+}
+
 func BenchmarkRouterParallel(b *testing.B) {
 	e := New(func(e *Engine) { e.HandleMethodNotAllowed = true })
-	e.Any("/files/*path", func(*Context) {})
+	e.AnyMethod("/files/*path", func(*Context) {})
 	e.NoMethod(func(*Context) {})
-	e.prepare()
+	e.Prepare()
 	b.ReportAllocs()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {

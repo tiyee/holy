@@ -62,6 +62,7 @@ func TestEnginePropagatesCancellation(t *testing.T) {
 		}
 		c.AbortWithStatus(204)
 	})
+	e.Prepare()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	r := httptest.NewRequest("GET", "/cancel", nil).WithContext(ctx)
@@ -79,14 +80,19 @@ func TestConfigurationFailureRemainsVisible(t *testing.T) {
 		handlers[i] = func(*Context) {}
 	}
 	e.GET("/limit", handlers...)
-	for range 2 {
+	for _, prepare := range []func(){
+		func() {
+			_ = e.Run(func(*http.Server) { t.Fatal("server configured before successful preparation") })
+		},
+		e.Prepare,
+	} {
 		func() {
 			defer func() {
-				if recover() == nil {
-					t.Error("configuration failure was swallowed")
+				if p := recover(); p != "too many handlers for GET /limit: 64 (maximum 63)" {
+					t.Errorf("startup panic = %v; want the handler limit failure", p)
 				}
 			}()
-			request(e, "GET", "/limit")
+			prepare()
 		}()
 	}
 }
@@ -94,6 +100,7 @@ func TestConfigurationFailureRemainsVisible(t *testing.T) {
 func TestRedirectRemainsLocal(t *testing.T) {
 	e := New()
 	e.GET("//outside.example/", func(c *Context) { c.String(200, "ok") })
+	e.Prepare()
 	w := request(e, "GET", "//outside.example?q=1")
 	if got := w.Header().Get("Location"); got != "/%2Foutside.example/?q=1" {
 		t.Fatal(got)
@@ -128,6 +135,7 @@ func TestTrailingSlashRedirectPreservesPath(t *testing.T) {
 					}
 					c.AbortWithStatus(http.StatusNoContent)
 				})
+				e.Prepare()
 				w := request(e, method, tc.path)
 				wantCode := http.StatusTemporaryRedirect
 				if method == http.MethodGet {
@@ -163,6 +171,7 @@ func TestMaximumChainDoesNotImplyAbort(t *testing.T) {
 		handlers[i] = func(*Context) {}
 	}
 	e.GET("/limit", handlers...)
+	e.Prepare()
 	request(e, "GET", "/limit")
 }
 
@@ -173,6 +182,7 @@ func TestGroupGuardSnapshot(t *testing.T) {
 	parent.Guard(func(c *Context) { c.Response().Header().Set("X-Parent", "new") })
 	child.GET("/old", func(c *Context) { c.String(200, "old") })
 	parent.GET("/new", func(c *Context) { c.String(200, "new") })
+	e.Prepare()
 	if w := request(e, "GET", "/api/v1/old"); w.Code != 200 || w.Header().Get("X-Parent") != "" {
 		t.Fatal(w.Code, w.Header())
 	}
@@ -190,6 +200,7 @@ func TestRealServerStreaming(t *testing.T) {
 			t.Error(err)
 		}
 	})
+	e.Prepare()
 	s := httptest.NewServer(e)
 	defer s.Close()
 	client := &http.Client{Timeout: time.Second}
@@ -212,6 +223,7 @@ func TestAbortHandlerPreservesStreamingFailure(t *testing.T) {
 		}
 		panic(http.ErrAbortHandler)
 	})
+	e.Prepare()
 	server := httptest.NewServer(e)
 	defer server.Close()
 	client := &http.Client{Timeout: time.Second}

@@ -26,15 +26,13 @@ func (g *RouterGroup) Group(prefix string, handlers ...HandlerFunc) *RouterGroup
 }
 
 func (e *Engine) newGroup(parent *RouterGroup, path string, handlers []HandlerFunc) *RouterGroup {
-	e.mu.Lock()
-	defer e.mu.Unlock()
 	e.checkMutable()
 	validateHandlers(handlers)
 	validatePath(path)
 	return &RouterGroup{engine: e, parent: parent, prefix: path, handlers: parent.withGuards(handlers)}
 }
 
-// withGuards 在注册锁内复制处理链，nil 分组表示直接在引擎上注册。
+// withGuards 在注册时复制处理链，nil 分组表示直接在引擎上注册。
 func (g *RouterGroup) withGuards(handlers []HandlerFunc) []HandlerFunc {
 	if g == nil {
 		return slices.Clone(handlers)
@@ -72,8 +70,6 @@ func joinPaths(prefix, path string) string {
 
 // Guard 为此后注册的路由和创建的子分组添加守卫。
 func (g *RouterGroup) Guard(handlers ...HandlerFunc) {
-	g.engine.mu.Lock()
-	defer g.engine.mu.Unlock()
 	g.engine.checkMutable()
 	validateHandlers(handlers)
 	g.handlers = append(g.handlers, handlers...)
@@ -119,7 +115,9 @@ func (g *RouterGroup) Union(methods []string, path string, handlers ...HandlerFu
 		g.Handle(method, path, handlers...)
 	}
 }
-func (g *RouterGroup) Any(path string, handlers ...HandlerFunc) {
+
+// AnyMethod 为分组内的同一路径注册内置的九种 HTTP 方法。
+func (g *RouterGroup) AnyMethod(path string, handlers ...HandlerFunc) {
 	g.Union([]string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodOptions, http.MethodHead, http.MethodTrace, http.MethodConnect}, path, handlers...)
 }
 func (g *RouterGroup) Rest(path string, rest any)    { registerRest(g, path, rest) }

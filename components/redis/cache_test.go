@@ -24,7 +24,7 @@ func (h commandHook) ProcessPipelineHook(next driver.ProcessPipelineHook) driver
 	return next
 }
 
-func TestCacheRequestContextAndSharedExpiry(t *testing.T) {
+func TestCacheRequestContextAndConfiguredExpiry(t *testing.T) {
 	client := driver.NewClient(&driver.Options{Addr: "unused:6379"})
 	defer client.Close()
 	type contextKey struct{}
@@ -36,13 +36,17 @@ func TestCacheRequestContextAndSharedExpiry(t *testing.T) {
 		case *driver.StringCmd:
 			cmd.SetVal("value")
 		case *driver.StatusCmd:
+			args := cmd.Args()
+			if len(args) != 5 || args[3] != "ex" || args[4] != int64(60) {
+				t.Errorf("写入参数 = %v，预期使用构造时配置的 60 秒有效期", args)
+			}
 			cmd.SetVal("OK")
 		case *driver.IntCmd:
 			cmd.SetVal(1)
 		}
 		return nil
 	}})
-	shared := NewCache(client)
+	shared := NewCacheWithExpiry(client, time.Minute)
 	ctx := context.WithValue(context.Background(), contextKey{}, "request")
 	canceled, cancel := context.WithCancel(ctx)
 	cancel()
@@ -63,7 +67,6 @@ func TestCacheRequestContextAndSharedExpiry(t *testing.T) {
 	for range 8 {
 		wg.Go(func() {
 			for range 50 {
-				shared.SetDefaultExp(time.Minute)
 				if err := bound.Set("key", []byte("value")); err != nil {
 					t.Error(err)
 				}
@@ -79,23 +82,6 @@ func TestCacheRequestContextAndSharedExpiry(t *testing.T) {
 	}
 	if err := NewCache(nil).SetContext(ctx, "key", nil); !errors.Is(err, ErrNoClient) {
 		t.Fatal(err)
-	}
-}
-
-func TestFailedOpenClosesClient(t *testing.T) {
-	failure := errors.New("ping failed")
-	var created *driver.Client
-	factory := func(opts *driver.Options) *driver.Client {
-		created = driver.NewClient(opts)
-		created.AddHook(commandHook{process: func(context.Context, driver.Cmder) error { return failure }})
-		return created
-	}
-	client, err := open(context.Background(), &driver.Options{Addr: "unused:6379"}, factory)
-	if client != nil || !errors.Is(err, failure) {
-		t.Fatalf("Open: %v %v", client, err)
-	}
-	if err := created.Close(); !errors.Is(err, driver.ErrClosed) {
-		t.Fatalf("failed client was not closed: %v", err)
 	}
 }
 
@@ -119,19 +105,15 @@ func TestCacheMissAndLegacyCompatibility(t *testing.T) {
 				return scenario.err
 			}})
 			provider := NewCache(client)
-			cache.InitCache(provider)
-			t.Cleanup(func() { cache.InitCache(nil) })
-			for _, get := range []func(context.Context, string) ([]byte, error){provider.GetContext, cache.GetContext} {
-				value, err := get(context.Background(), "key")
-				if string(value) != scenario.value || !errors.Is(err, scenario.err) {
-					t.Fatalf("读取返回 = %q, %v", value, err)
-				}
-				if got := errors.Is(err, cache.ErrMiss); got != (scenario.err == driver.Nil) {
-					t.Fatalf("ErrMiss = %v，错误 = %v", got, err)
-				}
+			value, err := provider.GetContext(context.Background(), "key")
+			if string(value) != scenario.value || !errors.Is(err, scenario.err) {
+				t.Fatalf("读取返回 = %q, %v", value, err)
+			}
+			if got := errors.Is(err, cache.ErrMiss); got != (scenario.err == driver.Nil) {
+				t.Fatalf("ErrMiss = %v，错误 = %v", got, err)
 			}
 			// 旧入口不仅保留 errors.Is，还保留直接比较底层错误的行为。
-			for _, get := range []func(string) ([]byte, error){provider.Get, provider.WithContext(context.Background()).Get, cache.Get} {
+			for _, get := range []func(string) ([]byte, error){provider.Get, provider.WithContext(context.Background()).Get} {
 				if _, err := get("key"); err != scenario.err {
 					t.Fatalf("旧入口错误 = %v，期望 %v", err, scenario.err)
 				}
@@ -140,7 +122,7 @@ func TestCacheMissAndLegacyCompatibility(t *testing.T) {
 	}
 }
 
-func TestCacheFacadeCancellationDuringGet(t *testing.T) {
+func TestCacheCancellationDuringGet(t *testing.T) {
 	client := driver.NewClient(&driver.Options{Addr: "unused:6379"})
 	t.Cleanup(func() { client.Close() })
 	ctx, cancel := context.WithCancel(context.Background())
@@ -153,9 +135,7 @@ func TestCacheFacadeCancellationDuringGet(t *testing.T) {
 		<-got.Done()
 		return got.Err()
 	}})
-	cache.InitCache(NewCache(client))
-	t.Cleanup(func() { cache.InitCache(nil) })
-	if _, err := cache.GetContext(ctx, "key"); !errors.Is(err, context.Canceled) || errors.Is(err, cache.ErrMiss) {
+	if _, err := NewCache(client).GetContext(ctx, "key"); !errors.Is(err, context.Canceled) || errors.Is(err, cache.ErrMiss) {
 		t.Fatalf("操作中取消返回 = %v", err)
 	}
 }

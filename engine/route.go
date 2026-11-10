@@ -31,8 +31,10 @@ func (ps Params) Get(name string) (string, bool) {
 func (ps Params) ByName(name string) string { value, _ := ps.Get(name); return value }
 
 // IRouter 负责路由的存储与匹配，实现自行决定内部结构。
-// 引擎在配置阶段串行调用 Insert/AddFallback，冻结后支持并发查询，
-// 实现无需自行加锁。实现须遵守：
+// 引擎在启动阶段串行调用 Insert 和 AddFallback，启动后路由表固定并支持并发查询。
+// 自定义实现交给引擎后，应用应通过引擎注册路由和选择器，并将返回的 Route 视为只读。
+// 实现须遵守以下约定。
+//
 //   - 按传入的 path 原样匹配。引擎默认传入 Request.URL.Path，仅在开启 RemoveExtraSlash 时合并连续斜杠；
 //   - 匹配能力由实现决定；支持通配时静态路径优先，失败回退参数分支，末尾 catch-all；
 //   - Lookup 未命中时返回 nil，并把 *params 恢复到调用前长度；

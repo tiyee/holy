@@ -41,17 +41,24 @@ var contextOperations = []struct {
 }
 
 func TestContextOperationsPreserveRequestAndErrors(t *testing.T) {
-	t.Cleanup(func() { InitCache(nil) })
 	type requestKey struct{}
 	ctx, cancel := context.WithTimeout(context.WithValue(context.Background(), requestKey{}, "request"), time.Minute)
 	defer cancel()
 	deadline, _ := ctx.Deadline()
 	backendErr := errors.New("backend unavailable")
 	for _, op := range contextOperations {
-		t.Run(op.name, func(t *testing.T) {
-			for _, wantErr := range []error{nil, fmt.Errorf("lookup: %w", ErrMiss), backendErr} {
+		for _, scenario := range []struct {
+			name string
+			err  error
+		}{
+			{"success", nil},
+			{"miss", fmt.Errorf("lookup: %w", ErrMiss)},
+			{"failure", backendErr},
+		} {
+			t.Run(op.name+"/"+scenario.name, func(t *testing.T) {
+				resetTestCache(t)
 				calls := 0
-				InitCache(&contextTestCache{testCache: &testCache{}, visit: func(got context.Context, method, key string, value []byte, exp time.Duration) error {
+				provider := &contextTestCache{testCache: &testCache{}, visit: func(got context.Context, method, key string, value []byte, exp time.Duration) error {
 					calls++
 					if got != ctx || got.Value(requestKey{}) != "request" {
 						t.Fatal("请求 Context 未原样传递")
@@ -70,18 +77,20 @@ func TestContextOperationsPreserveRequestAndErrors(t *testing.T) {
 					if method == "set-expiry" && exp != time.Minute {
 						t.Fatalf("过期时间 = %s", exp)
 					}
-					return wantErr
-				}})
-				if err := op.run(ctx); err != wantErr || calls != 1 {
-					t.Fatalf("操作错误 = %v，期望 %v；调用次数 = %d", err, wantErr, calls)
+					return scenario.err
+				}}
+				if err := InitCache(provider); err != nil {
+					t.Fatal(err)
 				}
-			}
-		})
+				if err := op.run(ctx); err != scenario.err || calls != 1 {
+					t.Fatalf("操作错误 = %v，期望 %v；调用次数 = %d", err, scenario.err, calls)
+				}
+			})
+		}
 	}
 }
 
 func TestContextOperationsRejectInvalidRequestsAndProviders(t *testing.T) {
-	t.Cleanup(func() { InitCache(nil) })
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
 	expired, stop := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
@@ -103,7 +112,12 @@ func TestContextOperationsRejectInvalidRequestsAndProviders(t *testing.T) {
 		{"no context capability", context.Background(), &testCache{}, ErrUnsupported},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
-			InitCache(scenario.provider)
+			resetTestCache(t)
+			if scenario.provider != nil {
+				if err := InitCache(scenario.provider); err != nil {
+					t.Fatal(err)
+				}
+			}
 			for _, op := range contextOperations {
 				if err := op.run(scenario.ctx); !errors.Is(err, scenario.want) {
 					t.Errorf("%s 错误 = %v，期望 %v", op.name, err, scenario.want)
@@ -113,24 +127,23 @@ func TestContextOperationsRejectInvalidRequestsAndProviders(t *testing.T) {
 	}
 }
 
-func TestContextOperationsDuringProviderReplacement(t *testing.T) {
-	t.Cleanup(func() { InitCache(nil) })
+func TestConcurrentContextOperations(t *testing.T) {
+	resetTestCache(t)
 	type requestKey struct{}
-	newProvider := func() *contextTestCache {
-		return &contextTestCache{testCache: &testCache{}, visit: func(ctx context.Context, _, _ string, _ []byte, _ time.Duration) error {
-			if ctx.Value(requestKey{}) == nil {
-				return errors.New("请求 Context 丢失")
-			}
-			return nil
-		}}
+	provider := &contextTestCache{testCache: &testCache{}, visit: func(ctx context.Context, _, _ string, _ []byte, _ time.Duration) error {
+		if ctx.Value(requestKey{}) == nil {
+			return errors.New("请求 Context 丢失")
+		}
+		return nil
+	}}
+	if err := InitCache(provider); err != nil {
+		t.Fatal(err)
 	}
-	InitCache(newProvider())
 	var wg sync.WaitGroup
 	for i := range 8 {
 		wg.Go(func() {
 			ctx := context.WithValue(context.Background(), requestKey{}, i)
 			for range 100 {
-				InitCache(newProvider())
 				for _, op := range contextOperations {
 					if err := op.run(ctx); err != nil {
 						t.Error(err)

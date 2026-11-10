@@ -8,7 +8,7 @@ import (
 
 func TestMetadataValidation(t *testing.T) {
 	for _, typ := range []reflect.Type{nil, reflect.TypeFor[valueModel](), reflect.TypeFor[*int]()} {
-		if _, err := loadMetadata(typ); !errors.Is(err, ErrInvalidModel) {
+		if _, err := loadMetadata(typ, JSONTags); !errors.Is(err, ErrInvalidModel) {
 			t.Fatalf("metadata for %v = %v", typ, err)
 		}
 	}
@@ -27,7 +27,7 @@ func (*metadataModel) TableName() string { return "metadata_records" }
 func (*metadataModel) Pk() string        { return "id" }
 
 func TestMetadataJSONMapping(t *testing.T) {
-	meta, err := loadMetadata(reflect.TypeFor[*metadataModel]())
+	meta, err := loadMetadata(reflect.TypeFor[*metadataModel](), JSONTags)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,25 +42,26 @@ func TestMetadataJSONMapping(t *testing.T) {
 	if quoteIdentifier("odd`column") != "`odd``column`" {
 		t.Fatal("identifier not escaped")
 	}
-	cached, err := loadMetadata(reflect.TypeFor[*metadataModel]())
+	cached, err := loadMetadata(reflect.TypeFor[*metadataModel](), JSONTags)
 	if err != nil || cached != meta {
 		t.Fatal("metadata not reused")
 	}
 }
 
 func TestDatabaseTagMappingIsOptIn(t *testing.T) {
-	legacy := New(&metadataModel{})
-	database := legacy.WithMapping(DatabaseTags)
-	if legacy.Fields() != "`id`,`name`" || database.Fields() != "`other_id`,`other_name`" {
+	m := New(&metadataModel{})
+	db := m.WithMapping(DatabaseTags)
+	if m.meta == nil || db.meta == nil ||
+		m.meta.columnSQL != "`id`,`name`" || db.meta.columnSQL != "`other_id`,`other_name`" {
 		t.Fatal("mapping modes overlap")
 	}
-	if legacy.meta == database.meta {
-		t.Fatal("mode missing from cache key")
+	if db.record != m.record {
+		t.Fatal("mapping copy replaced the record")
 	}
-	if again := New(&metadataModel{}).WithMapping(DatabaseTags); again.Fields() != database.Fields() || again.meta != database.meta {
+	if cached := New(&metadataModel{}).WithMapping(DatabaseTags); cached.meta != db.meta {
 		t.Fatal("database metadata not cached")
 	}
-	if _, err := legacy.WithMapping(MappingMode(255)).findMeta(); !errors.Is(err, ErrInvalidMapping) {
+	if err := m.WithMapping(MappingMode(255)).validateModel(); !errors.Is(err, ErrInvalidMapping) {
 		t.Fatal(err)
 	}
 }
@@ -71,7 +72,7 @@ type duplicateColumns struct {
 }
 
 func TestDuplicateColumnMappingRejected(t *testing.T) {
-	if _, err := loadMetadataFor(reflect.TypeFor[*duplicateColumns](), DatabaseTags); !errors.Is(err, ErrInvalidMapping) {
+	if _, err := loadMetadata(reflect.TypeFor[*duplicateColumns](), DatabaseTags); !errors.Is(err, ErrInvalidMapping) {
 		t.Fatal(err)
 	}
 }
@@ -90,13 +91,10 @@ func TestDatabaseMappingWritesUseDatabasePrimaryKey(t *testing.T) {
 	db := openTestDB(t, state)
 	registerTestDB(t, db, db)
 	m := New(&dbOnlyModel{ID: 7, Internal: "secret"}).WithMapping(DatabaseTags)
-	if m.Fields() != "`record_id`,`secret`,`fallback`" {
-		t.Fatal(m.Fields())
-	}
 	if _, err := m.Update(7); err != nil {
 		t.Fatal(err)
 	}
-	checkLegacyCall(t, state.calls[0], "update `db_records` set `secret`=?,`fallback`=? where `record_id`=?", "secret", "", int64(7))
+	checkSQLCall(t, state.calls[0], "update `db_records` set `secret`=?,`fallback`=? where `record_id`=?", "secret", "", int64(7))
 }
 
 type mixedCaseKeyModel struct {
@@ -114,6 +112,6 @@ func TestUpdateSkipsMixedCasePrimaryKey(t *testing.T) {
 		if _, err := m.Update(1); err != nil {
 			t.Fatal(err)
 		}
-		checkLegacyCall(t, state.calls[0], "update `records` set `Name`=? where `id`=?", "", int64(1))
+		checkSQLCall(t, state.calls[0], "update `records` set `Name`=? where `id`=?", "", int64(1))
 	}
 }

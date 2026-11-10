@@ -157,6 +157,7 @@ func TestContextSetSameSite(t *testing.T) {
 		c.SetCookieV2(&http.Cookie{Name: "unspecified", Value: "4"})
 		c.SetCookieV2(nil)
 	})
+	e.Prepare()
 	cookies := request(e, http.MethodGet, "/").Result().Cookies()
 	want := []http.SameSite{
 		http.SameSiteNoneMode, http.SameSiteNoneMode,

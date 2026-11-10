@@ -9,41 +9,32 @@ import (
 	"testing"
 )
 
-func TestLegacyMethodTemplateAndMetadata(t *testing.T) {
+func TestRowAndRowsUseBoundRecord(t *testing.T) {
 	state := &testDatabase{columns: []string{"id", "name", "score"}, data: [][]driver.Value{{int64(1), "first", int64(10)}}}
 	db := openTestDB(t, state)
-	record := &compatibilityModel{table: "cached_legacy", Template: "keep"}
+	record := &templateRecord{table: "template_records", Template: "keep"}
 	m := New(record).SetRDb(db).SetWDb(db)
-	if m.Fields() != "`id`,`name`,`score`" {
-		t.Fatal("legacy mapping used db tags")
-	}
-	meta := m.meta
-	other := New(&compatibilityModel{table: "other_table"})
-	other.Fields()
-	if other.meta != meta {
-		t.Fatal("legacy methods did not share cached metadata")
-	}
 	row, err := m.Row("id=?", []any{1})
 	if err != nil || row != record || record.Name != "first" {
 		t.Fatalf("Row = %+v, %v", row, err)
 	}
+	meta := m.meta
+	checkSQLCall(t, state.calls[0], "select `id`,`name`,`score` from `template_records` where id=?", int64(1))
 	state.data = [][]driver.Value{{int64(2), "partial", "bad integer"}}
 	if row, err := m.Row("", nil); err == nil || row != record || record.ID != 2 || record.Name != "partial" || record.Score != 10 {
 		t.Fatalf("partial Row = %+v, %v", row, err)
 	}
-	m.Record = &compatibilityModel{table: "replacement_table", Template: "replacement"}
+	otherRecord := &templateRecord{table: "other_records", Template: "other"}
+	other := New(otherRecord).SetRDb(db)
 	state.data = [][]driver.Value{{int64(3), "third", int64(30)}, {int64(4), "fourth", int64(40)}}
-	rows, err := m.Rows("", nil)
-	if err != nil || len(rows) != 2 || rows[0] == rows[1] || rows[0] == m.Record || rows[0].Template != "replacement" || rows[0].table != "replacement_table" || m.Record.ID != 0 || m.meta != meta {
+	rows, err := other.Rows("", nil)
+	if err != nil || len(rows) != 2 || rows[0] == rows[1] || rows[0] == otherRecord || rows[0].Template != "other" || rows[0].table != "other_records" || otherRecord.ID != 0 || other.meta != meta {
 		t.Fatalf("Rows = %+v, %v", rows, err)
 	}
-	checkLegacyCall(t, state.calls[2], "select `id`,`name`,`score` from `replacement_table`")
-	if binds := Binds(m.Record); binds[1] != &m.Record.Name || binds[1] == &record.Name {
-		t.Fatal("Binds reused addresses from an earlier record")
-	}
+	checkSQLCall(t, state.calls[2], "select `id`,`name`,`score` from `other_records`")
 }
 
-func TestLegacyMethodSavesMinimalHandle(t *testing.T) {
+func TestSavesUsesMinimalHandle(t *testing.T) {
 	failure := errors.New("batch failed")
 	for _, fail := range []bool{false, true} {
 		state := &testDatabase{}
@@ -51,31 +42,31 @@ func TestLegacyMethodSavesMinimalHandle(t *testing.T) {
 			state.execErr = failure
 		}
 		db := openTestDB(t, state)
-		m := New(&legacyMethodModel{}).SetWDb(contextOnly{db})
-		n, err := m.Saves([]*legacyMethodModel{{ID: 1}, {ID: 2}})
+		m := New(&testRecord{}).SetWDb(contextOnly{db})
+		n, err := m.Saves([]*testRecord{{ID: 1}, {ID: 2}})
 		if fail && (n != 0 || !errors.Is(err, failure)) || !fail && (n != 2 || err != nil) {
 			t.Fatalf("Saves = %d, %v", n, err)
 		}
-		if len(state.calls) != 1 || state.commits != 0 || state.rollbacks != 0 || state.stmtsClosed != 0 {
+		if len(state.calls) != 1 || state.commits != 0 || state.rollbacks != 0 || state.prepares != 0 {
 			t.Fatal("Saves did not execute exactly one statement on a minimal handle")
 		}
 	}
 }
 
-func TestLegacyMethodPaginationDefaults(t *testing.T) {
+func TestLimitDefaults(t *testing.T) {
 	state := &testDatabase{columns: []string{"id", "name", "score"}}
-	m := New(&legacyMethodModel{}).SetRDb(openTestDB(t, state))
+	m := New(&testRecord{}).SetRDb(openTestDB(t, state))
 	if _, err := m.Limit("", nil, 5, 0, ""); err != nil {
 		t.Fatal(err)
 	}
-	checkLegacyCall(t, state.calls[0], "select `id`,`name`,`score` from `test_records` limit 5 , 20")
+	checkSQLCall(t, state.calls[0], "select `id`,`name`,`score` from `test_records` limit 5 , 20")
 	if _, err := m.Limit(" ", nil, -1, -1, " "); err != nil {
 		t.Fatal(err)
 	}
-	checkLegacyCall(t, state.calls[1], "select `id`,`name`,`score` from `test_records` limit 20")
+	checkSQLCall(t, state.calls[1], "select `id`,`name`,`score` from `test_records` limit 20")
 }
 
-type legacyMethodModel struct {
+type testRecord struct {
 	ID        int64  `json:"id,omitempty"`
 	Name      string `json:"name,omitempty"`
 	Score     int64  `json:"score"`
@@ -85,62 +76,46 @@ type legacyMethodModel struct {
 	hidden    string
 }
 
-func (*legacyMethodModel) TableName() string { return "test_records" }
-func (*legacyMethodModel) Pk() string        { return "id" }
+func (*testRecord) TableName() string { return "test_records" }
+func (*testRecord) Pk() string        { return "id" }
 
-func TestLegacyMethodFieldMapping(t *testing.T) {
-	model := &legacyMethodModel{}
-	m := New(model)
-	if got := m.Fields(); got != "`id`,`name`,`score`" {
-		t.Fatalf("Fields() = %q", got)
-	}
-	binds := Binds(model)
-	if len(binds) != 3 {
-		t.Fatalf("Binds() length = %d", len(binds))
-	}
-	if binds[0] != &model.ID || binds[1] != &model.Name || binds[2] != &model.Score {
-		t.Fatalf("Binds() does not match column order: %v", binds)
-	}
-}
-
-func TestLegacyMethodMappedWrites(t *testing.T) {
+func TestWritesUseMappedColumns(t *testing.T) {
 	state := &testDatabase{}
 	db := openTestDB(t, state)
-	model := &legacyMethodModel{ID: 7, Name: "first", Score: 8, Ignored: "skip", Transient: "skip", hidden: "skip"}
+	model := &testRecord{ID: 7, Name: "first", Score: 8, Ignored: "skip", Transient: "skip", hidden: "skip"}
 	m := New(model).SetWDb(db)
 	id, err := m.Save()
 	if err != nil || id != 42 {
 		t.Fatalf("Save() = %d, %v", id, err)
 	}
-	checkLegacyCall(t, state.calls[0], "insert into `test_records` (`id`,`name`,`score`) values (?,?,?)", int64(7), "first", int64(8))
+	checkSQLCall(t, state.calls[0], "insert into `test_records` (`id`,`name`,`score`) values (?,?,?)", int64(7), "first", int64(8))
 	n, err := m.Update(7)
 	if err != nil || n != 1 {
 		t.Fatalf("Update() = %d, %v", n, err)
 	}
-	checkLegacyCall(t, state.calls[1], "update `test_records` set `name`=?,`score`=? where `id`=?", "first", int64(8), int64(7))
-	state.prepareErr = errors.New("Saves must not prepare a statement")
-	n, err = m.Saves([]*legacyMethodModel{model, {ID: 9, Name: "second", Score: 10}})
+	checkSQLCall(t, state.calls[1], "update `test_records` set `name`=?,`score`=? where `id`=?", "first", int64(8), int64(7))
+	n, err = m.Saves([]*testRecord{model, {ID: 9, Name: "second", Score: 10}})
 	if err != nil || n != 2 {
 		t.Fatalf("Saves() = %d, %v", n, err)
 	}
-	if len(state.calls) != 3 || state.stmtsClosed != 0 {
+	if len(state.calls) != 3 || state.prepares != 0 {
 		t.Fatal("Saves did not execute exactly one statement")
 	}
-	checkLegacyCall(t, state.calls[2], "insert into `test_records` (`id`,`name`,`score`) values (?,?,?),(?,?,?)", int64(7), "first", int64(8), int64(9), "second", int64(10))
+	checkSQLCall(t, state.calls[2], "insert into `test_records` (`id`,`name`,`score`) values (?,?,?),(?,?,?)", int64(7), "first", int64(8), int64(9), "second", int64(10))
 }
 
-func TestLegacyMethodWriteErrors(t *testing.T) {
+func TestWriteErrors(t *testing.T) {
 	failure := errors.New("write failed")
 	for _, operation := range []string{"Save", "Saves", "Update", "UpdateByPk", "Delete"} {
 		t.Run(operation, func(t *testing.T) {
 			state := &testDatabase{execErr: failure}
-			m := New(&legacyMethodModel{}).SetWDb(openTestDB(t, state))
+			m := New(&testRecord{}).SetWDb(openTestDB(t, state))
 			var err error
 			switch operation {
 			case "Save":
 				_, err = m.Save()
 			case "Saves":
-				_, err = m.Saves([]*legacyMethodModel{{}})
+				_, err = m.Saves([]*testRecord{{}})
 			case "Update":
 				_, err = m.Update(1)
 			case "UpdateByPk":
@@ -151,14 +126,14 @@ func TestLegacyMethodWriteErrors(t *testing.T) {
 			if !errors.Is(err, failure) {
 				t.Errorf("error = %v, want %v", err, failure)
 			}
-			if operation == "Saves" && (state.execCount != 1 || state.stmtsClosed != 0) {
+			if operation == "Saves" && (state.execCount != 1 || state.prepares != 0) {
 				t.Error("failed batch executed more than once or used a statement")
 			}
 		})
 	}
 }
 
-func TestLegacyMethodBatchFailures(t *testing.T) {
+func TestSavesErrors(t *testing.T) {
 	failure := errors.New("batch failed")
 	for _, operation := range []string{"exec", "affected rows"} {
 		t.Run(operation, func(t *testing.T) {
@@ -168,12 +143,12 @@ func TestLegacyMethodBatchFailures(t *testing.T) {
 			} else {
 				state.affectedErr = failure
 			}
-			m := New(&legacyMethodModel{}).SetWDb(openTestDB(t, state))
-			n, err := m.Saves([]*legacyMethodModel{{ID: 1}, {ID: 2}, {ID: 3}})
+			m := New(&testRecord{}).SetWDb(openTestDB(t, state))
+			n, err := m.Saves([]*testRecord{{ID: 1}, {ID: 2}, {ID: 3}})
 			if n != 0 || !errors.Is(err, failure) {
 				t.Fatalf("Saves = %d, %v", n, err)
 			}
-			if state.execCount != 1 || len(state.calls) != 1 || state.stmtsClosed != 0 {
+			if state.execCount != 1 || len(state.calls) != 1 || state.prepares != 0 {
 				t.Fatal("batch did not execute exactly once")
 			}
 		})
@@ -184,8 +159,8 @@ func TestSavesRowsAffected(t *testing.T) {
 	// A driver-reported result must be returned rather than the input length.
 	for _, affected := range []int64{0, 5} {
 		state := &testDatabase{affectedRows: &affected}
-		m := New(&legacyMethodModel{}).SetWDb(openTestDB(t, state))
-		n, err := m.Saves([]*legacyMethodModel{{ID: 1}, {ID: 2}})
+		m := New(&testRecord{}).SetWDb(openTestDB(t, state))
+		n, err := m.Saves([]*testRecord{{ID: 1}, {ID: 2}})
 		if err != nil || n != affected || state.execCount != 1 {
 			t.Fatalf("Saves = %d, %v; want %d", n, err, affected)
 		}
@@ -194,12 +169,12 @@ func TestSavesRowsAffected(t *testing.T) {
 
 func TestSavesInvalidRecords(t *testing.T) {
 	for _, rows := range [][]ITable{
-		{&legacyMethodModel{}, (*legacyMethodModel)(nil)},
-		{&legacyMethodModel{}, &cachedProjection{}},
-		{&legacyMethodModel{}, valueModel{}},
+		{&testRecord{}, (*testRecord)(nil)},
+		{&testRecord{}, &cachedProjection{}},
+		{&testRecord{}, valueModel{}},
 	} {
 		state := &testDatabase{}
-		m := New[ITable](&legacyMethodModel{}).SetWDb(openTestDB(t, state))
+		m := New[ITable](&testRecord{}).SetWDb(openTestDB(t, state))
 		if n, err := m.Saves(rows); n != 0 || !errors.Is(err, ErrInvalidModel) {
 			t.Fatalf("Saves = %d, %v", n, err)
 		}
@@ -209,7 +184,7 @@ func TestSavesInvalidRecords(t *testing.T) {
 	}
 }
 
-func TestLegacyMethodReadRows(t *testing.T) {
+func TestRowsAndLimit(t *testing.T) {
 	failure := errors.New("read failed")
 	for _, limit := range []bool{false, true} {
 		for _, scenario := range []string{"success", "empty", "query error", "scan error", "iteration error", "close error"} {
@@ -228,8 +203,8 @@ func TestLegacyMethodReadRows(t *testing.T) {
 				case "close error":
 					state.closeErr = failure
 				}
-				m := New(&legacyMethodModel{}).SetRDb(openTestDB(t, state))
-				var rows []*legacyMethodModel
+				m := New(&testRecord{}).SetRDb(openTestDB(t, state))
+				var rows []*testRecord
 				var err error
 				if limit {
 					rows, err = m.Limit("1=1", nil, 0, 10, "id")
@@ -267,30 +242,30 @@ func TestLegacyMethodReadRows(t *testing.T) {
 				if limit {
 					query += " order by id limit 10"
 				}
-				checkLegacyCall(t, state.calls[0], query)
+				checkSQLCall(t, state.calls[0], query)
 			})
 		}
 	}
 }
 
-func TestLegacyMethodRowAndAggregates(t *testing.T) {
+func TestRowAndAggregates(t *testing.T) {
 	state := &testDatabase{columns: []string{"id", "name", "score"}, data: [][]driver.Value{{int64(4), "row", int64(5)}}}
-	m := New(&legacyMethodModel{}).SetRDb(openTestDB(t, state))
+	m := New(&testRecord{}).SetRDb(openTestDB(t, state))
 	row, err := m.Row("0", nil)
 	if err != nil || row.ID != 4 || row.Name != "row" || row.Score != 5 {
 		t.Fatalf("Row() = %+v, %v", row, err)
 	}
-	checkLegacyCall(t, state.calls[0], "select `id`,`name`,`score` from `test_records` where 0")
+	checkSQLCall(t, state.calls[0], "select `id`,`name`,`score` from `test_records` where 0")
 	state.columns, state.data = []string{"n"}, [][]driver.Value{{int64(3)}}
 	if n, err := m.Count("1=1", nil); err != nil || n != 3 {
 		t.Fatalf("Count() = %d, %v", n, err)
 	}
-	checkLegacyCall(t, state.calls[1], "select count(*) as n from `test_records` where 1=1")
+	checkSQLCall(t, state.calls[1], "select count(*) as n from `test_records` where 1=1")
 	state.data = [][]driver.Value{{nil}}
 	if n, err := m.Sum("score", "0", nil); err != nil || n != 0 {
 		t.Fatalf("empty Sum() = %d, %v", n, err)
 	}
-	checkLegacyCall(t, state.calls[2], "select sum(`score`) as n from `test_records` where 0")
+	checkSQLCall(t, state.calls[2], "select sum(`score`) as n from `test_records` where 0")
 	state.data = [][]driver.Value{{int64(12)}}
 	if n, err := m.Sum("score", "", nil); err != nil || n != 12 {
 		t.Fatalf("Sum() = %d, %v", n, err)
@@ -301,15 +276,15 @@ func TestLegacyMethodRowAndAggregates(t *testing.T) {
 	}
 }
 
-func TestLegacyMethodEmptyWrites(t *testing.T) {
-	m := New(&legacyMethodModel{}) // No database: empty operations must not execute SQL.
+func TestEmptyWrites(t *testing.T) {
+	m := New(&testRecord{}) // No database: empty operations must not execute SQL.
 	if n, err := m.Saves(nil); err != nil || n != 0 {
 		t.Errorf("empty Saves() = %d, %v", n, err)
 	}
 	if _, err := m.UpdateByPk(nil, 1); err == nil {
 		t.Error("empty update accepted")
 	}
-	noFields := New(&legacyMethodEmptyModel{})
+	noFields := New(&unmappedModel{})
 	if _, err := noFields.Save(); err == nil {
 		t.Error("insert with no mapped fields accepted")
 	}
@@ -318,79 +293,21 @@ func TestLegacyMethodEmptyWrites(t *testing.T) {
 	}
 }
 
-type legacyMethodEmptyModel struct{ Value string }
+type unmappedModel struct{ Value string }
 
-func (*legacyMethodEmptyModel) TableName() string { return "empty" }
-func (*legacyMethodEmptyModel) Pk() string        { return "id" }
+func (*unmappedModel) TableName() string { return "empty" }
+func (*unmappedModel) Pk() string        { return "id" }
 
-func TestLegacyMethodUpdateByPkAndIdentifiers(t *testing.T) {
+func TestUpdateByPkQuotesIdentifiers(t *testing.T) {
 	state := &testDatabase{}
-	m := New(&legacyMethodModel{}).SetWDb(openTestDB(t, state))
+	m := New(&testRecord{}).SetWDb(openTestDB(t, state))
 	if n, err := m.UpdateByPk(map[string]interface{}{"score": int64(8), "na`me": "value"}, 4); err != nil || n != 1 {
 		t.Fatalf("UpdateByPk() = %d, %v", n, err)
 	}
-	checkLegacyCall(t, state.calls[0], "update `test_records` set `na``me`=?,`score`=? where `id`=?", "value", int64(8), int64(4))
+	checkSQLCall(t, state.calls[0], "update `test_records` set `na``me`=?,`score`=? where `id`=?", "value", int64(8), int64(4))
 }
 
-func TestLegacyMethodAutoTransaction(t *testing.T) {
-	failure := errors.New("transaction failed")
-	rollbackFailure := errors.New("rollback failed")
-	for _, scenario := range []string{"success", "begin error", "write error", "commit error", "rollback error", "panic"} {
-		t.Run(scenario, func(t *testing.T) {
-			state := &testDatabase{}
-			switch scenario {
-			case "begin error":
-				state.beginErr = failure
-			case "write error", "rollback error":
-				state.execErr = failure
-			case "commit error":
-				state.commitErr = failure
-			}
-			if scenario == "rollback error" {
-				state.rollbackErr = rollbackFailure
-			}
-			db := openTestDB(t, state)
-			registerTestDB(t, nil, db)
-			var panicValue any
-			err := func() (err error) {
-				defer func() { panicValue = recover() }()
-				return AutoTransaction(func(tx IDBHandle) error {
-					if scenario == "panic" {
-						panic("callback panic")
-					}
-					_, err := New(&legacyMethodModel{}).SetWDb(tx).UpdateByPk(map[string]interface{}{"name": "value"}, 1)
-					return err
-				})
-			}()
-			if scenario == "panic" {
-				if panicValue != "callback panic" {
-					t.Errorf("panic not preserved: %v", panicValue)
-				}
-			} else if scenario == "success" {
-				if err != nil {
-					t.Fatal(err)
-				}
-			} else if !errors.Is(err, failure) {
-				t.Errorf("error = %v, want %v", err, failure)
-			}
-			if scenario == "rollback error" && !errors.Is(err, rollbackFailure) {
-				t.Errorf("rollback error lost: %v", err)
-			}
-			wantCommits, wantRollbacks := 0, 0
-			switch scenario {
-			case "success", "commit error":
-				wantCommits = 1
-			case "write error", "rollback error", "panic":
-				wantRollbacks = 1
-			}
-			if state.commits != wantCommits || state.rollbacks != wantRollbacks {
-				t.Errorf("commits/rollbacks = %d/%d, want %d/%d", state.commits, state.rollbacks, wantCommits, wantRollbacks)
-			}
-		})
-	}
-}
-
-type compatibilityModel struct {
+type templateRecord struct {
 	ID       int64  `json:"id" db:"different_id,auto"`
 	Name     string `json:"name" db:"different_name"`
 	Score    int64  `json:"score"`
@@ -398,10 +315,10 @@ type compatibilityModel struct {
 	table    string
 }
 
-func (m *compatibilityModel) TableName() string { return m.table }
-func (*compatibilityModel) Pk() string          { return "id" }
+func (m *templateRecord) TableName() string { return m.table }
+func (*templateRecord) Pk() string          { return "id" }
 
-func checkLegacyCall(t *testing.T, call testCall, query string, args ...driver.Value) {
+func checkSQLCall(t *testing.T, call testCall, query string, args ...driver.Value) {
 	t.Helper()
 	if strings.Join(strings.Fields(call.query), " ") != strings.Join(strings.Fields(query), " ") {
 		t.Errorf("query = %q, want %q", call.query, query)

@@ -10,7 +10,6 @@ type ICacheM interface {
 	MDelete(...string) error
 }
 
-func InitCacheM(c ICacheM) { InitCache(c) }
 func multi() (ICacheM, error) {
 	c, err := current()
 	if err != nil {

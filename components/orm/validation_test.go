@@ -13,9 +13,9 @@ func databaseOperations[T ITable]() map[string]func(*ORM[T]) error {
 		"Count": func(m *ORM[T]) error { _, err := m.Count("", nil); return err },
 		"Sum":   func(m *ORM[T]) error { _, err := m.Sum("score", "", nil); return err },
 		"Save":  func(m *ORM[T]) error { _, err := m.Save(); return err },
-		"Saves": func(m *ORM[T]) error { _, err := m.Saves([]T{m.Record}); return err },
+		"Saves": func(m *ORM[T]) error { _, err := m.Saves([]T{m.record}); return err },
 		"SavesInBatches": func(m *ORM[T]) error {
-			_, err := m.SavesInBatches([]T{m.Record}, 1)
+			_, err := m.SavesInBatches([]T{m.record}, 1)
 			return err
 		},
 		"Update": func(m *ORM[T]) error { _, err := m.Update(1); return err },
@@ -33,16 +33,14 @@ func TestInvalidModelsReturnErrors(t *testing.T) {
 		record ITable
 	}{
 		{"nil interface", nil},
-		{"typed nil", (*compatibilityModel)(nil)},
+		{"typed nil", (*templateRecord)(nil)},
 		{"struct value", valueModel{}},
 	} {
 		for name, operation := range databaseOperations[ITable]() {
 			t.Run(model.name+"/"+name, func(t *testing.T) {
 				state := &testDatabase{}
 				db := openTestDB(t, state)
-				m := New[ITable](&compatibilityModel{table: "records"}).SetRDb(db).SetWDb(db)
-				m.Fields() // Also exercise replacement after metadata has been cached.
-				m.Record = model.record
+				m := New(model.record).SetDB(db)
 				if err := operation(m); !errors.Is(err, ErrInvalidModel) {
 					t.Fatalf("error = %v, want ErrInvalidModel", err)
 				}
@@ -52,14 +50,4 @@ func TestInvalidModelsReturnErrors(t *testing.T) {
 			})
 		}
 	}
-}
-
-func TestBindsRejectsNilRecord(t *testing.T) {
-	defer func() {
-		err, ok := recover().(error)
-		if !ok || !errors.Is(err, ErrInvalidModel) {
-			t.Fatalf("panic = %v, want ErrInvalidModel", err)
-		}
-	}()
-	Binds((*legacyMethodModel)(nil))
 }

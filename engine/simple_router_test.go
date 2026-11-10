@@ -1,7 +1,9 @@
 package engine
 
 import (
+	"errors"
 	"fmt"
+	"net/http"
 	"reflect"
 	"strings"
 	"sync"
@@ -19,6 +21,8 @@ func TestWithSimpleRouter(t *testing.T) {
 	first.GET("/users/42", func(c *Context) { c.String(200, "first") })
 	second.GET("/users/42", func(c *Context) { c.String(200, "second") })
 	first.GET("/first-only", func(c *Context) { c.String(200, "first") })
+	first.Prepare()
+	second.Prepare()
 	for _, tc := range []struct {
 		e    *Engine
 		want string
@@ -40,6 +44,74 @@ func TestRouterOptionOrder(t *testing.T) {
 	e := New(WithRouter(custom), WithSimpleRouter())
 	if _, ok := e.router.(*SimpleRouter); !ok {
 		t.Fatalf("last router option was not applied: %T", e.router)
+	}
+}
+
+func TestRoutingFrozenAtStartup(t *testing.T) {
+	for _, entry := range []string{"Run", "Prepare"} {
+		t.Run(entry, func(t *testing.T) {
+			r := NewSimpleRouter()
+			e := New(WithRouter(r))
+			handler := func(c *Context) { c.AbortWithStatus(http.StatusNoContent) }
+			e.GET("/ready", handler)
+			e.Fallback(func(req *http.Request) HandlerFunc {
+				if req.URL.Path == "/fallback" {
+					return handler
+				}
+				return nil
+			})
+
+			checkFrozen := func() {
+				late := &Route{Method: http.MethodGet, Path: "/late"}
+				for _, tc := range []struct {
+					name   string
+					mutate func()
+				}{
+					{"Engine.GET", func() { e.GET(late.Path, handler) }},
+					{"SimpleRouter.Insert", func() { r.Insert(late.Method, late.Path, late) }},
+					{"SimpleRouter.AddFallback", func() { r.AddFallback(func(*http.Request) HandlerFunc { return handler }) }},
+					{"WithRouter", func() { WithRouter(newExactRouter())(e) }},
+					{"WithSimpleRouter", func() { WithSimpleRouter()(e) }},
+				} {
+					t.Run(tc.name, func(t *testing.T) {
+						defer func() {
+							if recover() == nil {
+								t.Error("routing mutation accepted after startup")
+							}
+						}()
+						tc.mutate()
+					})
+				}
+			}
+
+			if entry == "Run" {
+				err := e.Run(func(server *http.Server) {
+					checkFrozen()
+					if err := server.Close(); err != nil {
+						t.Fatalf("close server before listening: %v", err)
+					}
+				})
+				if !errors.Is(err, http.ErrServerClosed) {
+					t.Fatalf("Run returned %v; want http.ErrServerClosed", err)
+				}
+			} else {
+				e.Prepare()
+				checkFrozen()
+			}
+
+			for _, tc := range []struct {
+				path string
+				code int
+			}{
+				{"/ready", http.StatusNoContent},
+				{"/fallback", http.StatusNoContent},
+				{"/late", http.StatusNotFound},
+			} {
+				if w := request(e, http.MethodGet, tc.path); w.Code != tc.code {
+					t.Errorf("%s: status = %d; want %d", tc.path, w.Code, tc.code)
+				}
+			}
+		})
 	}
 }
 
@@ -111,6 +183,7 @@ func TestSimpleRouterRejectedInsert(t *testing.T) {
 		{"GET", "/existing", valid},
 		{"", "/invalid", valid},
 		{"GET POST", "/invalid", valid},
+		{"SYNC-V2", "/invalid", valid},
 		{"GET", "relative", valid},
 		{"GET", "/bad?query", valid},
 		{"GET", "/nil", nil},
@@ -149,6 +222,7 @@ func TestSimpleRouterHTTP(t *testing.T) {
 		}
 		c.String(200, c.FullPath())
 	})
+	e.Prepare()
 	if w := request(e, "GET", "/api/users/42"); w.Code != 200 || w.Body.String() != "/api/users/42" || strings.Join(order, ",") != "global,hook,group,handler" {
 		t.Fatalf("code=%d body=%q order=%v", w.Code, w.Body.String(), order)
 	}
@@ -180,6 +254,7 @@ func TestSimpleRouterConcurrentRequests(t *testing.T) {
 		path := fmt.Sprintf("/users/%d", i)
 		e.GET(path, func(c *Context) { c.String(200, c.FullPath()) })
 	}
+	e.Prepare()
 	var wg sync.WaitGroup
 	for i := range 32 {
 		wg.Go(func() {

@@ -1,7 +1,6 @@
 package orm
 
 import (
-	"errors"
 	"sync"
 	"testing"
 )
@@ -23,76 +22,49 @@ type cachedProjection struct {
 func (*cachedProjection) TableName() string { return "cached_records" }
 func (*cachedProjection) Pk() string        { return "id" }
 
-func TestLazyInstanceMetadata(t *testing.T) {
-	var first *OrmV2[*cachedModel] = New(&cachedModel{})
-	second := New(&cachedModel{})
-	if first.meta != nil || second.meta != nil {
-		t.Fatal("New eagerly loaded metadata")
-	}
-	if first.Fields() != "`id`,`name`" || second.Fields() != "`id`,`name`" {
-		t.Fatal("legacy mapping changed")
-	}
+func TestNewSharesMetadataAcrossRecords(t *testing.T) {
+	firstRecord, secondRecord := &cachedModel{}, &cachedModel{}
+	first, second := New(firstRecord), New(secondRecord)
 	meta := first.meta
 	if meta == nil || second.meta != meta {
 		t.Fatal("instances did not reuse the cached mapping")
 	}
-	first.Record = &cachedModel{Name: "replacement"}
-	first.Fields()
-	if first.meta != meta {
-		t.Fatal("replacing a record of the same type discarded its mapping")
-	}
-	binds := scanBinds(first.Record, meta.fields)
-	if binds[1] != &first.Record.Name || binds[1] == &second.Record.Name {
+	binds := make([]any, len(meta.fields))
+	bindQueryInto(first.record, meta, binds)
+	if binds[1] != &firstRecord.Name || binds[1] == &secondRecord.Name {
 		t.Fatal("mapping cached record addresses")
 	}
 }
 
-func TestMetadataAfterRecordTypeChange(t *testing.T) {
-	m := New[ITable](&cachedModel{})
-	original, err := m.findMeta()
-	if err != nil {
-		t.Fatal(err)
-	}
-	m.Record = &cachedProjection{}
-	if m.Fields() != "`id`,`score`" || m.meta == original {
+func TestNewUsesConcreteModelType(t *testing.T) {
+	model := New[ITable](&cachedModel{})
+	projection := New[ITable](&cachedProjection{})
+	if model.meta == nil || projection.meta == nil ||
+		model.meta.columnSQL != "`id`,`name`" || projection.meta.columnSQL != "`id`,`score`" {
 		t.Fatal("same table reused a different struct's mapping")
-	}
-	m.Record = valueModel{}
-	if _, err := m.findMeta(); !errors.Is(err, ErrInvalidModel) {
-		t.Fatalf("invalid replacement = %v", err)
-	}
-	m.Record = (*cachedModel)(nil)
-	if _, err := m.findMeta(); !errors.Is(err, ErrInvalidModel) {
-		t.Fatalf("nil replacement = %v", err)
-	}
-	m.Record = &cachedModel{}
-	meta, err := m.findMeta()
-	if err != nil || meta != original {
-		t.Fatal("valid replacement failed to recover its mapping")
 	}
 }
 
-type lazyConcurrentModel struct {
+type concurrentModel struct {
 	ID int64 `json:"id"`
 }
 
-func (*lazyConcurrentModel) TableName() string { return "lazy_concurrent" }
-func (*lazyConcurrentModel) Pk() string        { return "id" }
+func (*concurrentModel) TableName() string { return "concurrent_records" }
+func (*concurrentModel) Pk() string        { return "id" }
 
-func TestConcurrentLazyMetadata(t *testing.T) {
+func TestConcurrentMetadataInitialization(t *testing.T) {
 	start := make(chan struct{})
 	results := make(chan *metadata, 32)
 	var wg sync.WaitGroup
 	for range 32 {
 		wg.Go(func() {
-			m := New(&lazyConcurrentModel{})
 			<-start
-			meta, err := m.findMeta()
-			if err != nil {
+			m := New(&concurrentModel{})
+			if err := m.validateModel(); err != nil {
 				t.Error(err)
 				return
 			}
-			results <- meta
+			results <- m.meta
 		})
 	}
 	close(start)

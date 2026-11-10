@@ -57,4 +57,4 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - run: go test -race -count=1 -v ./components/orm ./components/redis ./stores -run Integration
+      - run: go test -race -count=1 -v ./stores/mysql ./stores/redis ./components/orm ./components/redis -run Integration

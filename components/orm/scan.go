@@ -19,7 +19,10 @@ func isRawBytesField(t reflect.Type) bool {
 }
 
 func bindQueryInto[T ITable](record T, meta *metadata, dest []any) {
-	bindInto(record, meta.fields, dest)
+	value := reflect.ValueOf(record).Elem()
+	for i, field := range meta.fields {
+		dest[i] = value.Field(field.index).Addr().Interface()
+	}
 	for _, i := range meta.rawBytesColumns {
 		if raw, ok := dest[i].(*sql.RawBytes); ok {
 			// *[]byte 让 database/sql 在驱动缓冲仍有效时复制字节。

@@ -42,6 +42,7 @@ func TestCustomRouterProbeFallback(t *testing.T) {
 	}
 	e.NoRoute(fallback, func(c *Context) { c.AbortWithStatus(404) })
 	e.NoMethod(fallback, func(c *Context) { c.AbortWithStatus(405) })
+	e.Prepare()
 	for range 2 {
 		for _, tc := range []struct {
 			method, path    string
@@ -71,15 +72,13 @@ func TestCustomRouterProbeFallback(t *testing.T) {
 	}
 }
 
-func TestMethodProbeWithManyCustomMethods(t *testing.T) {
+func TestMethodProbeWithManyRegisteredMethods(t *testing.T) {
 	e := New(func(e *Engine) { e.HandleMethodNotAllowed = true })
-	var methods []string
-	for i := 11; i >= 0; i-- {
-		method := fmt.Sprintf("CUSTOM%d", i)
-		methods = append(methods, method)
-		e.Handle(method, "/files/*rest", func(c *Context) { c.AbortWithStatus(204) })
-	}
+	methods := []string{"REPORT", "COPY", "MOVE", "QUERY", "LOCK", "MKCOL", "PROPFIND",
+		"PROPPATCH", "UNLOCK", "VERSION-CONTROL", "POST", "DELETE"}
+	e.Union(methods, "/files/*rest", func(c *Context) { c.AbortWithStatus(204) })
 	sort.Strings(methods)
+	e.Prepare()
 	if w := request(e, "GET", "/files/a"); w.Code != 405 || w.Header().Get("Allow") != strings.Join(methods, ", ") {
 		t.Fatalf("code=%d allow=%q", w.Code, w.Header().Get("Allow"))
 	}
@@ -96,6 +95,7 @@ func TestConcurrentRouteProbes(t *testing.T) {
 		}
 		c.AbortWithStatus(405)
 	})
+	e.Prepare()
 	var wg sync.WaitGroup
 	for i := range 32 {
 		wg.Go(func() {
