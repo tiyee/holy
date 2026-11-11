@@ -38,6 +38,33 @@ func logValueText(x any, format string) string {
 
 const cycleText = "<cycle>"
 
+// cyclePlaceholder 保留 fmt.Sprint 对非字符串参数的空格规则。
+type cyclePlaceholder struct{}
+
+func (cyclePlaceholder) String() string { return cycleText }
+
+// logSprint 按 fmt.Sprint 规则拼接消息，跳过会无限展开的循环引用。
+func logSprint(args []any) string {
+	if len(args) == 1 {
+		if msg, ok := args[0].(string); ok {
+			return msg
+		}
+	}
+	var safe []any
+	for i, arg := range args {
+		if (textFormat{verb: 'v'}).cyclic(arg) {
+			if safe == nil {
+				safe = slices.Clone(args)
+			}
+			safe[i] = cyclePlaceholder{}
+		}
+	}
+	if safe != nil {
+		args = safe
+	}
+	return fmt.Sprint(args...)
+}
+
 // 由 fmt 自己解析变参下标、宽度和精度。探测时不调用用户方法，也不遍历只用于
 // %T、%p 或完全未使用的 map。只有会递归展开的实参才需要替换。
 func logSprintf(format string, args ...any) string {

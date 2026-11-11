@@ -1,5 +1,6 @@
 // Package log 是一个基于 log/slog 的高性能结构化日志库，
 // 借鉴 zap 的核心优化思路，零第三方依赖，可独立复制到任何项目使用。
+// 调用方创建、持有并关闭 Logger，各实例的配置与资源相互独立。
 //
 // # 优化点与实现的对应关系
 //
@@ -16,7 +17,7 @@
 //
 // # 快速开始
 //
-//	log.MustInit(log.Config{
+//	logger, err := log.New(log.Config{
 //	    Level:   "debug",
 //	    Format:  "json",
 //	    Outputs: []string{"stdout", "/var/log/app/app.log"},
@@ -24,16 +25,20 @@
 //	    Async:   &log.AsyncConfig{Enabled: true},
 //	    InitialFields: []log.Field{log.String("app", "gaokao")},
 //	})
-//	defer log.Close()
+//	if err != nil {
+//	    return err
+//	}
+//	defer logger.Close()
 //
-//	log.Info("server started", log.String("addr", ":8080"))
-//	log.Infow("user login", "uid", 42, log.Int("source", 3))
-//	log.Ctx(ctx).Info("with trace")
+//	logger.Info("server started", log.String("addr", ":8080"))
+//	sugar := logger.Sugar()
+//	sugar.Info("user ID: ", 42)
+//	sugar.Infof("user ID: %d", 42)
+//	sugar.Infow("user login", "uid", 42, log.Int("source", 3))
 //
 // # zap 迁移提示
 //
 //	Logger{Debug,Info,Warn,Error,DPanic,Panic,Fatal}(msg, fields...)  → 同名方法
-//	Logger.Sugar().{Infof,Infow,...}                                  → 同名方法
-//	zap.String/Int/Error/...                                          → 本包同名 Field 构造器
-//	zap.L()/zap.S()                                                   → log.L()/log.S()
+//	Logger.Sugar().{Info,Infof,Infow,...}                              → 同名方法
+//	zap.String/Int/Error/...                                         → 本包同名 Field 构造器
 package log

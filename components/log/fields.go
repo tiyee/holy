@@ -8,7 +8,7 @@ import (
 // Field 兼容 zap.Field 的概念，直接复用 slog.Attr（零拷贝、避免装箱）。
 type Field = slog.Attr
 
-// 常用强类型字段构造器：不经过 any 装箱，也不依赖反射。
+// String 常用强类型字段构造器：不经过 any 装箱，也不依赖反射。
 func String(key, val string) Field               { return slog.String(key, val) }
 func Int(key string, v int) Field                { return slog.Int(key, v) }
 func Int8(key string, v int8) Field              { return slog.Int64(key, int64(v)) }
@@ -32,13 +32,9 @@ func Group(key string, args ...Field) Field {
 	return slog.Attr{Key: key, Value: slog.GroupValue(args...)}
 }
 
-// Err 等价 zap.Error：固定 key 为 "error"，输出 err.Error()；err 为 nil 时省略字段。
-// （zap.Error 在本包更名为 Err，避免与包级日志函数 log.Error 冲突）
-func Err(err error) Field {
-	if err == nil {
-		return Skip()
-	}
-	return slog.Any("error", err)
+// Error 构造键为 "error" 的错误字段，err 为 nil 时省略字段。
+func Error(err error) Field {
+	return NamedError("error", err)
 }
 
 // NamedError 是可指定 key 的 Error（对应 zap.NamedError）；err 为 nil 时省略字段。

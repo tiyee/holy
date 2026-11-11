@@ -47,7 +47,7 @@ type consoleHandler struct {
 	name       string // Named 的 Logger 名字，Handle 期懒编码（见 withName）
 	addSource  bool
 	color      bool
-	traceOn    bool
+	options    handlerOptions
 
 	// preformatted 缓存公共字段的文本形式，形如 ` app=api env=prod`
 	preformatted []byte
@@ -57,14 +57,14 @@ type consoleHandler struct {
 
 // newConsoleHandler 构建记录器；timeLayout 为空表示不输出行首时间（DisableTime），
 // 字段值内的时间回退 defaultConsoleTimeFormat。
-func newConsoleHandler(w io.Writer, leveler slog.Leveler, timeLayout string, addSource, color, traceOn bool) *consoleHandler {
+func newConsoleHandler(w io.Writer, leveler slog.Leveler, timeLayout string, addSource, color bool, options handlerOptions) *consoleHandler {
 	return &consoleHandler{
 		w:          w,
 		leveler:    leveler,
 		timeLayout: timeLayout,
 		addSource:  addSource,
 		color:      color,
-		traceOn:    traceOn,
+		options:    options,
 	}
 }
 
@@ -156,8 +156,8 @@ func (h *consoleHandler) Handle(ctx context.Context, r slog.Record) error {
 		buf.Write(h.preformatted)
 	}
 
-	if h.traceOn {
-		if ti, ok := extractTrace(ctx); ok {
+	if h.options.trace != nil && ctx != nil {
+		if ti, ok := h.options.trace(ctx); ok {
 			buf.AppendString(" trace_id=")
 			buf.AppendString(ti.TraceID)
 			buf.AppendString(" span_id=")
@@ -176,7 +176,7 @@ func (h *consoleHandler) Handle(ctx context.Context, r slog.Record) error {
 
 	_, err := h.w.Write(buf.bs)
 	if err != nil {
-		reportWriteError(err, buf.bs)
+		h.options.writeErrors.report(err, buf.bs)
 	}
 	putBuffer(buf)
 	return err

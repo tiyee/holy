@@ -68,8 +68,8 @@ type Config struct {
 	Async *AsyncConfig
 	// Sampler 日志采样
 	Sampler *SamplerConfig
-	// Trace 链路关联
-	Trace TraceConfig
+	// TraceExtractor 从日志调用的 Context 提取链路标识；nil 时省略链路字段。
+	TraceExtractor TraceExtractor
 
 	// Hooks 每条日志写出后依次触发（zap Hooks 选项的等价物）
 	Hooks []Hook
@@ -77,14 +77,8 @@ type Config struct {
 	// 适合冲刷 tracing、上报崩溃等收尾工作
 	FatalHook Hook
 
-	// InitialFields 全局公共字段，只编码一次长期缓存（WithAttrs 优化）
+	// InitialFields 实例公共字段，只编码一次长期缓存（WithAttrs 优化）
 	InitialFields []slog.Attr
-}
-
-// TraceConfig 控制从 context 自动附加链路标识。
-// 需先通过 SetTraceExtractor 注册提取函数（库不绑定具体追踪实现）。
-type TraceConfig struct {
-	Enabled bool
 }
 
 // normalize 填充默认值并校验。
@@ -159,14 +153,18 @@ func buildHandler(cfg *Config) (slog.Handler, *slog.LevelVar, []io.Closer, error
 		jsonLayoutStr = ""
 	}
 	consoleLayoutStr := consoleLayout(cfg)
+	opts := handlerOptions{
+		trace:       cfg.TraceExtractor,
+		writeErrors: new(writeErrorReporter),
+	}
 
 	// newBranch 组装单条链：writer → 编码器 → 公共字段预编码
 	newBranch := func(w io.Writer, format Format) slog.Handler {
 		var h slog.Handler
 		if format == FormatConsole {
-			h = newConsoleHandler(w, levelVar, consoleLayoutStr, cfg.AddSource, cfg.Development, cfg.Trace.Enabled)
+			h = newConsoleHandler(w, levelVar, consoleLayoutStr, cfg.AddSource, cfg.Development, opts)
 		} else {
-			h = newJSONHandler(w, levelVar, jsonLayoutStr, cfg.AddSource, cfg.Trace.Enabled, epoch)
+			h = newJSONHandler(w, levelVar, jsonLayoutStr, cfg.AddSource, epoch, opts)
 		}
 		if len(cfg.InitialFields) > 0 {
 			h = h.WithAttrs(cfg.InitialFields)

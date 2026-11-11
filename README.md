@@ -1,6 +1,6 @@
 # holy
 
-holy 是一个基于 `net/http` 的轻量 Go Web 框架，提供参数路由、路由分组、守卫和 JSON 请求处理。HTTP 引擎只依赖标准库和内置日志组件。应用可以按需使用单表 ORM、MySQL 连接池、Redis 缓存和 JWT。
+holy 是一个基于 `net/http` 的轻量 Go Web 框架，提供参数路由、路由分组、守卫和 JSON 请求处理。HTTP 引擎只依赖标准库。应用可以按需使用日志组件、单表 ORM、MySQL 连接池、Redis 缓存和 JWT。
 
 模块路径为 `github.com/tiyee/holy`，最低要求 Go 1.26.0。
 
@@ -113,7 +113,21 @@ func main() {
 | 设置 Cookie | `c.SetCookie` 默认使用 `SameSite=None`。可先调用 `c.SetSameSite(http.SameSiteLaxMode)` 设置本次请求后续写入的 Cookie 策略 |
 | 传递取消与超时 | 把 `c.Ctx()` 传给数据库、缓存或其他下游操作。引擎会在请求结束时复用 `*engine.Context`，异步任务需要的数据应在处理器内复制 |
 
-应用可在引擎启动前设置 `JSONBinder`、`JSONRenderer` 和 `EnvelopeBuilder`，分别定制 JSON 解码、编码和 Ajax 响应结构。处理器发生普通 panic 时，引擎记录错误，响应尚未提交时返回 500。`http.ErrAbortHandler` 会继续交给标准库处理。
+应用可在引擎启动前设置 `JSONBinder`、`JSONRenderer` 和 `EnvelopeBuilder`，分别定制 JSON 解码、编码和 Ajax 响应结构。引擎捕获处理器的普通 panic，并在响应尚未提交时返回 500。`http.ErrAbortHandler` 会继续交给标准库处理。
+
+## 日志
+
+导入 `github.com/tiyee/holy/components/log`，用 `log.New` 创建 Logger，由应用持有并决定共享范围。停止所有日志写入后，调用 `logger.Close()` 冲刷异步队列并关闭该实例的资源。示例服务用 `stores/log.Open` 创建实例，通过应用守卫记录请求日志。[示例入口](cmd/main.go) · [日志配置](components/log/README.md#配置说明config)
+
+```go
+logger, err := log.New(log.Config{Format: "console", Level: "info"})
+if err != nil {
+	return err
+}
+logger.Info("server started", log.String("addr", ":8080"))
+sugar := logger.Sugar()
+sugar.Infow("request completed", "status", 200)
+```
 
 ## MySQL 与 ORM
 
@@ -165,7 +179,7 @@ func findUser(ctx context.Context, id int64) (*User, error) {
 
 | 包 | 使用入口 |
 | --- | --- |
-| [`components/log`](components/log/README.md) | 使用 `github.com/tiyee/holy/components/log` 导入。用 `log.Init` 配置 JSON 或控制台输出、采样、异步写入和文件滚动，退出时用 `log.Close()` 冲刷日志 |
+| [`components/log`](components/log/README.md) | 用 [`log.New`](#日志) 创建应用持有的日志实例，支持 JSON 或控制台输出、采样、异步写入和文件滚动 |
 | [`components/jwt`](components/jwt/) | `jwt.NewWithSecret[*jwt.User](secret)` 创建 HS256 签发器，空密钥返回 `jwt.ErrEmptySecret`。`Encode` 返回带 `Bearer ` 前缀的值，`Decode` 验签并默认校验 `exp`，过期返回 `jwt.ErrTokenExpired` |
 | [`components/crypto/aes_cbc`](components/crypto/aes_cbc/) | `aes_cbc.NewWithKey(key)` 接受 16、24 或 32 字节密钥。`Encrypt` 使用 AES-GCM 和随机 nonce，`Decrypt` 解密并验证密文完整性 |
 | [`helps`](helps/) | `MonthRange` 按输入时区计算左闭右开的月份范围，`NonceStr` 生成 32 位小写十六进制随机字符串 |

@@ -86,7 +86,7 @@ func TestJSONValueTypes(t *testing.T) {
 		Int64("i", -9),
 		Duration("d", 1500*time.Millisecond),
 		Any("when", time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)),
-		Err(errors.New("boom")),
+		Error(errors.New("boom")),
 		Any("raw", []byte("hi")),
 		Any("obj", map[string]int{"x": 1}),
 		Any("nil", nil),
@@ -158,7 +158,7 @@ func TestJSONGroups(t *testing.T) {
 func TestJSONWithGroupSemantics(t *testing.T) {
 	var buf bytes.Buffer
 	lv := new(slog.LevelVar)
-	h := newJSONHandler(&buf, lv, "", false, false, false)
+	h := newJSONHandler(&buf, lv, "", false, false, handlerOptions{})
 	hg := h.WithGroup("g")
 	r := slog.NewRecord(time.Now(), LevelInfo, "m", 0)
 	r.AddAttrs(String("k", "v"))
@@ -358,7 +358,7 @@ func TestSampler(t *testing.T) {
 func TestAsyncFlushAndSync(t *testing.T) {
 	var out safeBuffer
 	aw := newAsyncWriter(&out, AsyncConfig{MaxQueueBytes: 1 << 20, FlushInterval: time.Hour})
-	h := newJSONHandler(aw, new(slog.LevelVar), "", false, false, false)
+	h := newJSONHandler(aw, new(slog.LevelVar), "", false, false, handlerOptions{})
 	lg := newLogger(h, nil, []io.Closer{aw}, false, false)
 	for i := 0; i < 50; i++ {
 		lg.Info("async", Int("i", i))
@@ -415,7 +415,7 @@ func (m *muWriter) Write(p []byte) (int, error) {
 func TestAsyncCloseNoLoss(t *testing.T) {
 	var out safeBuffer
 	aw := newAsyncWriter(&out, AsyncConfig{MaxQueueBytes: 1 << 20, FlushInterval: time.Hour})
-	h := newJSONHandler(aw, new(slog.LevelVar), "", false, false, false)
+	h := newJSONHandler(aw, new(slog.LevelVar), "", false, false, handlerOptions{})
 	lg := newLogger(h, nil, nil, false, false)
 	for i := 0; i < 100; i++ {
 		lg.Info("close-flush", Int("i", i))
@@ -437,7 +437,7 @@ func TestAsyncDrop(t *testing.T) {
 	// 首轮空转后休眠，写入确定性地堆积超限。
 	var out safeBuffer
 	aw := newAsyncWriter(&out, AsyncConfig{MaxQueueBytes: 4096, FlushInterval: time.Hour})
-	h := newJSONHandler(aw, new(slog.LevelVar), "", false, false, false)
+	h := newJSONHandler(aw, new(slog.LevelVar), "", false, false, handlerOptions{})
 	lg := newLogger(h, nil, []io.Closer{aw}, false, false)
 	for range 100 {
 		lg.Info(strings.Repeat("x", 1024))
@@ -492,7 +492,7 @@ func TestSyncOrdering(t *testing.T) {
 	// 后立刻 Sync"覆盖各种 interleaving。
 	var out safeBuffer
 	aw := newAsyncWriter(&out, AsyncConfig{MaxQueueBytes: 1 << 20, FlushInterval: time.Hour})
-	h := newJSONHandler(aw, new(slog.LevelVar), "", false, false, false)
+	h := newJSONHandler(aw, new(slog.LevelVar), "", false, false, handlerOptions{})
 	lg := newLogger(h, nil, []io.Closer{aw}, false, false)
 
 	const rounds, perRound = 50, 20
@@ -531,7 +531,7 @@ func (c *chunkRecorder) Write(p []byte) (int, error) {
 func TestAsyncLineAtomicity(t *testing.T) {
 	out := &chunkRecorder{}
 	aw := newAsyncWriter(out, AsyncConfig{MaxQueueBytes: 1 << 20, WriteBufferSize: 1, FlushInterval: time.Hour})
-	h := newJSONHandler(aw, new(slog.LevelVar), "", false, false, false)
+	h := newJSONHandler(aw, new(slog.LevelVar), "", false, false, handlerOptions{})
 	lg := newLogger(h, nil, []io.Closer{aw}, false, false)
 	const n = 50
 	for i := range n {
@@ -588,7 +588,7 @@ func TestAsyncStat(t *testing.T) {
 func TestLoggerAsyncStat(t *testing.T) {
 	var out safeBuffer
 	aw := newAsyncWriter(&out, AsyncConfig{MaxQueueBytes: 4096, FlushInterval: time.Hour})
-	h := newJSONHandler(aw, new(slog.LevelVar), "", false, false, false)
+	h := newJSONHandler(aw, new(slog.LevelVar), "", false, false, handlerOptions{})
 	lg := newLogger(h, nil, []io.Closer{aw}, false, false)
 	for range 100 {
 		lg.Info(strings.Repeat("x", 1024))
@@ -604,7 +604,7 @@ func TestLoggerAsyncStat(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 无异步 writer 时 ok 为 false
-	plain := newLogger(newJSONHandler(&out, new(slog.LevelVar), "", false, false, false), nil, nil, false, false)
+	plain := newLogger(newJSONHandler(&out, new(slog.LevelVar), "", false, false, handlerOptions{}), nil, nil, false, false)
 	if _, ok := plain.AsyncStat(); ok {
 		t.Fatal("AsyncStat should report false without async writer")
 	}
@@ -751,35 +751,39 @@ func TestRotatePrune(t *testing.T) {
 // ---------- trace ----------
 
 func TestTraceExtractor(t *testing.T) {
-	var buf bytes.Buffer
-	l := newTestLogger(t, &buf, func(c *Config) { c.Trace.Enabled = true })
-	defer SetTraceExtractor(nil)
-
-	// 未注册提取器：无 trace 字段
-	l.Info("no trace")
-	if strings.Contains(buf.String(), "trace_id") {
-		t.Fatal("trace should be absent")
-	}
-
-	SetTraceExtractor(func(ctx context.Context) (TraceInfo, bool) {
-		if ctx.Value(traceKey{}) == nil {
-			return TraceInfo{}, false
+	var jsonOut, consoleOut, noTraceOut bytes.Buffer
+	extractor := func(id string) TraceExtractor {
+		return func(ctx context.Context) (TraceInfo, bool) {
+			return TraceInfo{TraceID: id, SpanID: "sid"}, ctx.Value(traceKey{}) != nil
 		}
-		return TraceInfo{TraceID: "tid", SpanID: "sid"}, true
-	})
-
-	buf.Reset()
-	l.Info("still no trace") // ctx 无标记
-	if strings.Contains(buf.String(), "trace_id") {
-		t.Fatal("trace should be absent without ctx")
 	}
+	j := newTestLogger(t, &jsonOut, func(c *Config) {
+		c.TraceExtractor = extractor("json-id")
+	})
+	console := newTestLogger(t, &consoleOut, func(c *Config) {
+		c.Format = "console"
+		c.TraceExtractor = extractor("console-id")
+	})
+	noTrace := newTestLogger(t, &noTraceOut, nil)
 
-	buf.Reset()
-	lc := l.WithContext(context.WithValue(context.Background(), traceKey{}, true))
-	lc.Info("with trace")
-	m := parseLines(t, buf.String())[0]
-	if m["trace_id"] != "tid" || m["span_id"] != "sid" {
-		t.Fatalf("trace fields: %v", m)
+	ctx := context.WithValue(t.Context(), traceKey{}, true)
+	j.Info("no trace without context")
+	j.WithContext(ctx).With(String("app", "demo")).Info("with trace")
+	console.StdLogger().InfoContext(ctx, "with trace")
+	noTrace.WithContext(ctx).Info("no extractor")
+
+	lines := parseLines(t, jsonOut.String())
+	if _, ok := lines[0]["trace_id"]; ok {
+		t.Fatalf("未命中提取器时应省略链路字段：%v", lines[0])
+	}
+	if lines[1]["trace_id"] != "json-id" || lines[1]["span_id"] != "sid" {
+		t.Fatalf("JSON 链路字段不符：%v", lines[1])
+	}
+	if !strings.Contains(consoleOut.String(), "trace_id=console-id span_id=sid") {
+		t.Fatalf("console 链路字段不符：%s", &consoleOut)
+	}
+	if line := parseLines(t, noTraceOut.String())[0]; line["trace_id"] != nil || line["span_id"] != nil {
+		t.Fatalf("实例未配置提取器时应省略链路字段：%v", line)
 	}
 }
 
@@ -794,7 +798,7 @@ func TestZapStyleAPI(t *testing.T) {
 	l.Info("info msg", String("k", "v"))
 	l.Sugar().Infow("sugar w", "uid", 42, "src", "app")
 	l.Sugar().Infof("sugar f %d", 7)
-	l.Named("sub").With(Int("x", 1)).Error("named error", Err(errors.New("bad")))
+	l.Named("sub").With(Int("x", 1)).Error("named error", Error(errors.New("bad")))
 
 	lines := parseLines(t, buf.String())
 	if len(lines) != 4 {
@@ -870,33 +874,34 @@ func TestSlogInterop(t *testing.T) {
 	}
 }
 
-// ---------- 全局 API ----------
+// ---------- SugaredLogger ----------
 
-func TestGlobalAPI(t *testing.T) {
-	var buf bytes.Buffer
-	defer SetDefault(nil)
-	if err := Init(Config{Writer: &buf, Level: "warn"}); err != nil {
-		t.Fatal(err)
+func TestSugaredLoggerMessages(t *testing.T) {
+	var out bytes.Buffer
+	l := newTestLogger(t, &out, nil)
+	l.SetLevel(LevelInfo)
+	s := l.Sugar()
+	called := false
+	s.Debug(formatProbe(func(fmt.State, rune) { called = true }))
+	if called {
+		t.Fatal("禁用级别不应格式化消息")
 	}
-	Info("hidden", String("k", "v"))
-	Warn("shown", "uid", 42)
-	Errorw("shown too", "code", 7)
-	Errorf("shown %d", 3)
-	lines := parseLines(t, buf.String())
-	if len(lines) != 3 {
-		t.Fatalf("want 3 lines:\n%s", buf.String())
+	s.Info("complete: ", 3, 4, "%")
+	s.Warn("literal %s")
+	s.Error(errors.New("failed"))
+	lines := parseLines(t, out.String())
+	want := []struct{ level, message string }{
+		{"INFO", "complete: 3 4%"},
+		{"WARN", "literal %s"},
+		{"ERROR", "failed"},
 	}
-	if lines[0]["uid"] != float64(42) {
-		t.Fatalf("argsToAttrs kv: %v", lines[0])
+	if len(lines) != len(want) {
+		t.Fatalf("日志条数错误：%v", lines)
 	}
-	if lines[2]["msg"] != "shown 3" {
-		t.Fatalf("Errorf: %v", lines[2])
-	}
-
-	// 惰性默认
-	SetDefault(nil)
-	if Default() == nil {
-		t.Fatal("Default should lazily init")
+	for i, entry := range want {
+		if lines[i]["level"] != entry.level || lines[i]["msg"] != entry.message {
+			t.Errorf("日志内容错误：%v，期望 %v", lines[i], entry)
+		}
 	}
 }
 
@@ -993,7 +998,7 @@ func TestAttrTimeFollowsTimeFormat(t *testing.T) {
 func TestErrNilOmitted(t *testing.T) {
 	var buf bytes.Buffer
 	l := newTestLogger(t, &buf, nil)
-	l.Info("e", Err(nil), NamedError("detail", nil), String("k", "v"))
+	l.Info("e", Error(nil), NamedError("detail", nil), String("k", "v"))
 	m := parseLines(t, buf.String())[0]
 	if _, ok := m["error"]; ok {
 		t.Fatalf("nil error should be omitted: %v", m)
@@ -1099,7 +1104,7 @@ func TestLoggerCloseLIFO(t *testing.T) {
 		t.Fatal(err)
 	}
 	aw := newAsyncWriter(rw, AsyncConfig{MaxQueueBytes: 1 << 20, FlushInterval: time.Hour})
-	h := newJSONHandler(aw, new(slog.LevelVar), "", false, false, false)
+	h := newJSONHandler(aw, new(slog.LevelVar), "", false, false, handlerOptions{})
 	// buildWriter 的注册顺序：文件在前，异步在后
 	lg := newLogger(h, nil, []io.Closer{rw, aw}, false, false)
 	for i := range 10 {
@@ -1137,77 +1142,55 @@ func TestAsyncDrainStragglers(t *testing.T) {
 	}
 }
 
-func TestInitClosesPreviousLogger(t *testing.T) {
+func TestLoggerInstancesCloseIndependently(t *testing.T) {
 	dir := t.TempDir()
-	f1 := filepath.Join(dir, "one.log")
-	SetDefault(nil)
-	if err := Init(Config{
-		Outputs: []string{f1},
-		Level:   "debug",
-		Async:   &AsyncConfig{Enabled: true, FlushInterval: time.Hour},
-	}); err != nil {
+	open := func(path string) *Logger {
+		t.Helper()
+		l, err := New(Config{
+			Outputs: []string{path},
+			Async:   &AsyncConfig{Enabled: true, FlushInterval: time.Hour},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = l.Close() })
+		return l
+	}
+	firstPath, secondPath := filepath.Join(dir, "first.log"), filepath.Join(dir, "second.log")
+	first, second := open(firstPath), open(secondPath)
+	first.Info("first")
+	if err := first.Close(); err != nil {
 		t.Fatal(err)
 	}
-	Info("reinit-flush")
-	// 重新 Init 应冲刷并关闭旧 Logger（FlushInterval 为 1h，唯一落盘机会来自 Close）
-	if err := Init(Config{Outputs: []string{"stdout"}, Level: "info"}); err != nil {
+	second.Info("second")
+	if err := second.Close(); err != nil {
 		t.Fatal(err)
 	}
-	defer SetDefault(nil)
-	bs, err := os.ReadFile(f1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(bs), "reinit-flush") {
-		t.Fatalf("previous logger not flushed on re-Init: %q", bs)
+	for path, want := range map[string]string{firstPath: "first", secondPath: "second"} {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if lines := parseLines(t, string(data)); len(lines) != 1 || lines[0]["msg"] != want {
+			t.Errorf("%s 关闭后的日志不符：%v", path, lines)
+		}
 	}
 }
 
-// 旧实例排空失败时应返回原始错误，新默认实例仍应可用。
-func TestInitReturnsPreviousCloseError(t *testing.T) {
-	defer SetDefault(nil)
+func TestLoggerCloseReturnsFlushError(t *testing.T) {
 	var failed failWriter
 	failed.fail.Store(true)
 	aw := newAsyncWriter(&failed, AsyncConfig{FlushInterval: time.Hour})
-	old := newLogger(newJSONHandler(aw, new(slog.LevelVar), "", false, false, false),
+	logger := newLogger(newJSONHandler(aw, new(slog.LevelVar), "", false, false, handlerOptions{}),
 		nil, []io.Closer{aw}, false, false)
-	defer old.Close()
-	SetDefault(old)
-	old.Info("pending")
+	defer logger.Close()
+	logger.Info("pending")
 
-	var replacement bytes.Buffer
-	err := Init(Config{Writer: &replacement})
-	if !errors.Is(err, errInjected) {
-		t.Errorf("Init 未返回旧实例关闭错误：%v", err)
+	if err := logger.Close(); !errors.Is(err, errInjected) {
+		t.Errorf("Close 未保留冲刷错误：%v", err)
 	}
 	if _, err := aw.Write([]byte("closed\n")); !errors.Is(err, errClosed) {
-		t.Errorf("旧实例没有关闭：%v", err)
-	}
-	if Default() == old {
-		t.Fatal("新默认实例没有安装")
-	}
-	Info("replacement")
-	lines := parseLines(t, replacement.String())
-	if len(lines) != 1 || lines[0]["msg"] != "replacement" {
-		t.Fatalf("新默认实例不可用：%v", lines)
-	}
-}
-
-func TestInitBuildFailureKeepsPreviousLogger(t *testing.T) {
-	defer SetDefault(nil)
-	var out bytes.Buffer
-	old := newTestLogger(t, &out, nil)
-	SetDefault(old)
-	if err := Init(Config{Format: "invalid"}); err == nil {
-		t.Fatal("非法配置没有返回错误")
-	}
-	if Default() != old {
-		t.Fatal("构建失败替换了默认实例")
-	}
-	Info("previous")
-	lines := parseLines(t, out.String())
-	if len(lines) != 1 || lines[0]["msg"] != "previous" {
-		t.Fatalf("旧实例不可用：%v", lines)
+		t.Errorf("异步 writer 没有关闭：%v", err)
 	}
 }
 
@@ -1230,15 +1213,12 @@ func TestConfigValidation(t *testing.T) {
 	}
 }
 
-func TestPackagePanicVariants(t *testing.T) {
+func TestSugaredPanicVariants(t *testing.T) {
 	var buf bytes.Buffer
-	defer SetDefault(nil)
-	if err := Init(Config{Writer: &buf, Level: "debug"}); err != nil {
-		t.Fatal(err)
-	}
+	s := newTestLogger(t, &buf, nil).Sugar()
 	func() {
 		defer func() { recover() }()
-		Panicf("boom %d", 7)
+		s.Panicf("boom %d", 7)
 	}()
 	m := parseLines(t, buf.String())[0]
 	if m["msg"] != "boom 7" || m["stack"] == nil {
@@ -1247,7 +1227,7 @@ func TestPackagePanicVariants(t *testing.T) {
 	buf.Reset()
 	func() {
 		defer func() { recover() }()
-		Panicw("boom w", "k", 1)
+		s.Panicw("boom w", "k", 1)
 	}()
 	m = parseLines(t, buf.String())[0]
 	if m["k"] != float64(1) || m["stack"] == nil {
@@ -1255,8 +1235,8 @@ func TestPackagePanicVariants(t *testing.T) {
 	}
 	// 生产默认（Development=false）：DPanicf/DPanicw 只记录不 panic
 	buf.Reset()
-	DPanicf("dp %s", "x")
-	DPanicw("dp w", "k2", 2)
+	s.DPanicf("dp %s", "x")
+	s.DPanicw("dp w", "k2", 2)
 	lines := parseLines(t, buf.String())
 	if len(lines) != 2 {
 		t.Fatalf("DPanic variants should log without panic: %s", buf.String())
@@ -1273,15 +1253,11 @@ func TestPanicVariantsFlushBeforePanic(t *testing.T) {
 		call func(*Logger)
 	}{
 		{"logger", func(l *Logger) { l.Panic("panic marker") }},
-		{"package", func(l *Logger) { Panic("panic marker") }},
-		{"package-f", func(l *Logger) { Panicf("panic %s", "marker") }},
-		{"package-w", func(l *Logger) { Panicw("panic marker", "key", "value") }},
+		{"sugar", func(l *Logger) { l.Sugar().Panic("panic ", "marker") }},
 		{"sugar-f", func(l *Logger) { l.Sugar().Panicf("panic %s", "marker") }},
 		{"sugar-w", func(l *Logger) { l.Sugar().Panicw("panic marker", "key", "value") }},
 		{"logger-dpanic", func(l *Logger) { l.DPanic("panic marker") }},
-		{"package-dpanic", func(l *Logger) { DPanic("panic marker") }},
-		{"package-dpanic-f", func(l *Logger) { DPanicf("panic %s", "marker") }},
-		{"package-dpanic-w", func(l *Logger) { DPanicw("panic marker", "key", "value") }},
+		{"sugar-dpanic", func(l *Logger) { l.Sugar().DPanic("panic ", "marker") }},
 		{"sugar-dpanic-f", func(l *Logger) { l.Sugar().DPanicf("panic %s", "marker") }},
 		{"sugar-dpanic-w", func(l *Logger) { l.Sugar().DPanicw("panic marker", "key", "value") }},
 	}
@@ -1289,22 +1265,20 @@ func TestPanicVariantsFlushBeforePanic(t *testing.T) {
 		for _, mode := range []string{"enabled", "filtered", "sync-error"} {
 			t.Run(call.name+"/"+mode, func(t *testing.T) {
 				synctest.Test(t, func(t *testing.T) {
-					defer SetDefault(nil)
 					var healthy safeBuffer
 					aw := newAsyncWriter(&healthy, AsyncConfig{FlushInterval: time.Hour})
 					lv := new(slog.LevelVar)
-					var h slog.Handler = newJSONHandler(aw, lv, "", false, false, false)
+					var h slog.Handler = newJSONHandler(aw, lv, "", false, false, handlerOptions{})
 					closers := []io.Closer{aw}
 					if mode == "sync-error" {
 						var failed failWriter
 						failed.fail.Store(true)
 						other := newAsyncWriter(&failed, AsyncConfig{FlushInterval: time.Hour})
-						h = Tee(newJSONHandler(other, lv, "", false, false, false), h)
+						h = Tee(newJSONHandler(other, lv, "", false, false, handlerOptions{}), h)
 						closers = []io.Closer{other, aw}
 					}
 					lg := newLogger(h, lv, closers, true, false)
 					defer lg.Close()
-					SetDefault(lg)
 					// 首轮消费结束后再入队，避免后台首轮写出掩盖缺少 Sync 的问题。
 					synctest.Wait()
 					lg.Info("pending")
@@ -1346,32 +1320,6 @@ type testUser struct {
 
 func (u testUser) MarshalLogObject() []Field {
 	return []Field{Int("id", u.ID), String("name", u.Name)}
-}
-
-func TestGlobalSugarCache(t *testing.T) {
-	var a, b safeBuffer
-	defer SetDefault(nil)
-	if err := Init(Config{Writer: &a, Level: "debug"}); err != nil {
-		t.Fatal(err)
-	}
-	s1 := S()
-	s1.Errorw("via sugar")
-	if !strings.Contains(a.String(), "via sugar") {
-		t.Fatalf("sugar write missing: %q", a.String())
-	}
-	if S() != s1 {
-		t.Fatal("S() should return the cached sugar")
-	}
-	if err := Init(Config{Writer: &b, Level: "debug"}); err != nil {
-		t.Fatal(err)
-	}
-	if S() == s1 {
-		t.Fatal("S() should rebuild after Init replaces the default")
-	}
-	S().Errorw("new sugar")
-	if strings.Contains(a.String(), "new sugar") || !strings.Contains(b.String(), "new sugar") {
-		t.Fatalf("sugar not rebound to new default: a=%q b=%q", a.String(), b.String())
-	}
 }
 
 func TestTimeEpochMillis(t *testing.T) {
@@ -1438,8 +1386,8 @@ func TestTeeConfigFormats(t *testing.T) {
 
 func TestTeeFunc(t *testing.T) {
 	var b1, b2 bytes.Buffer
-	h1 := newJSONHandler(&b1, new(slog.LevelVar), "", false, false, false)
-	h2 := newJSONHandler(&b2, new(slog.LevelVar), "", false, false, false)
+	h1 := newJSONHandler(&b1, new(slog.LevelVar), "", false, false, handlerOptions{})
+	h2 := newJSONHandler(&b2, new(slog.LevelVar), "", false, false, handlerOptions{})
 	th := Tee(h1, h2)
 	r := slog.NewRecord(time.Now(), LevelInfo, "tee func", 0)
 	if err := th.Handle(context.Background(), r); err != nil {
@@ -1617,7 +1565,7 @@ func TestAsyncConcurrentSyncWakeup(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		var out safeBuffer
 		aw := newAsyncWriter(&out, AsyncConfig{MaxQueueBytes: 1 << 20, FlushInterval: time.Hour})
-		h := newJSONHandler(aw, new(slog.LevelVar), "", false, false, false)
+		h := newJSONHandler(aw, new(slog.LevelVar), "", false, false, handlerOptions{})
 		lg := newLogger(h, nil, []io.Closer{aw}, false, false)
 		start := time.Now()
 		var wg sync.WaitGroup
@@ -1774,8 +1722,8 @@ func TestFatalSyncAllBranches(t *testing.T) {
 		first := newAsyncWriter(&failed, AsyncConfig{FlushInterval: time.Hour})
 		second := newAsyncWriter(&healthy, AsyncConfig{FlushInterval: time.Hour})
 		lg := newLogger(Tee(
-			newJSONHandler(first, new(slog.LevelVar), "", false, false, false),
-			newJSONHandler(second, new(slog.LevelVar), "", false, false, false),
+			newJSONHandler(first, new(slog.LevelVar), "", false, false, handlerOptions{}),
+			newJSONHandler(second, new(slog.LevelVar), "", false, false, handlerOptions{}),
 		), nil, []io.Closer{first, second}, false, false)
 		defer lg.Close()
 		synctest.Wait()
@@ -2062,7 +2010,7 @@ func TestAnyRawMessageJSONL(t *testing.T) {
 
 func TestWrapHandler(t *testing.T) {
 	var buf bytes.Buffer
-	h := newJSONHandler(&buf, new(slog.LevelVar), "", false, false, false)
+	h := newJSONHandler(&buf, new(slog.LevelVar), "", false, false, handlerOptions{})
 	l := WrapHandler(h)
 	l.Info("wrapped", String("k", "v"))
 	l.Sugar().Errorf("wrapped %d", 2)
@@ -2101,12 +2049,9 @@ func TestNewFailureClosesResources(t *testing.T) {
 	countLoops := func() int {
 		bs := make([]byte, 1<<20)
 		n := runtime.Stack(bs, true)
-		return strings.Count(string(bs[:n]), "zlog.(*asyncWriter).loop(")
+		return strings.Count(string(bs[:n]), ".(*asyncWriter).loop(")
 	}
 	before := countLoops()
-	globalCloser.mu.Lock()
-	registered := len(globalCloser.closers)
-	globalCloser.mu.Unlock()
 	for range 3 {
 		l, err := New(cfg)
 		if err == nil || l != nil {
@@ -2116,11 +2061,6 @@ func TestNewFailureClosesResources(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 	if after := countLoops(); after != before {
 		t.Errorf("New 失败后遗留 %d 个消费者", after-before)
-	}
-	globalCloser.mu.Lock()
-	defer globalCloser.mu.Unlock()
-	if len(globalCloser.closers) != registered {
-		t.Error("失败的装配不应注册到全局资源表")
 	}
 }
 
@@ -2286,16 +2226,14 @@ func TestRotateBackupCollisionPrune(t *testing.T) {
 func TestLogContextStackAndSource(t *testing.T) {
 	var out bytes.Buffer
 	ctx := context.WithValue(context.Background(), traceKey{}, "requested")
-	defer SetTraceExtractor(nil)
-	SetTraceExtractor(func(ctx context.Context) (TraceInfo, bool) {
-		id, ok := ctx.Value(traceKey{}).(string)
-		return TraceInfo{TraceID: id, SpanID: "span"}, ok
-	})
 	var hookContext context.Context
 	l := newTestLogger(t, &out, func(c *Config) {
 		c.AddSource = true
 		c.StacktraceLevel = "error"
-		c.Trace.Enabled = true
+		c.TraceExtractor = func(ctx context.Context) (TraceInfo, bool) {
+			id, ok := ctx.Value(traceKey{}).(string)
+			return TraceInfo{TraceID: id, SpanID: "span"}, ok
+		}
 		c.Hooks = []Hook{func(ctx context.Context, r slog.Record) { hookContext = ctx }}
 	}).WithContext(context.WithValue(context.Background(), traceKey{}, "bound"))
 	fields := make([]Field, 1, 2)
@@ -2325,13 +2263,10 @@ func TestDPanicFilteredConsistency(t *testing.T) {
 		log  func(*Logger)
 	}{
 		{"logger", func(l *Logger) { l.DPanic("dp") }},
-		{"package", func(l *Logger) { DPanic("dp") }},
-		{"package-f", func(l *Logger) { DPanicf("%s", "dp") }},
-		{"package-w", func(l *Logger) { DPanicw("dp", "k", 1) }},
+		{"sugar", func(l *Logger) { l.Sugar().DPanic("dp") }},
 		{"sugar-f", func(l *Logger) { l.Sugar().DPanicf("%s", "dp") }},
 		{"sugar-w", func(l *Logger) { l.Sugar().DPanicw("dp", "k", 1) }},
 	}
-	defer SetDefault(nil)
 	for _, development := range []bool{false, true} {
 		for _, level := range []string{"debug", "fatal"} {
 			for _, call := range calls {
@@ -2343,8 +2278,6 @@ func TestDPanicFilteredConsistency(t *testing.T) {
 						c.Level = level
 						c.FatalHook = func(context.Context, slog.Record) { hooks++ }
 					})
-					SetDefault(l)
-					defer SetDefault(nil)
 					panicked := false
 					func() { defer func() { panicked = recover() != nil }(); call.log(l) }()
 					if panicked != development {
@@ -2387,7 +2320,7 @@ func TestTeeSampledBranches(t *testing.T) {
 						func(context.Context, slog.Record) { hooks++ },
 					}}
 				}
-				other := newJSONHandler(&plain, new(slog.LevelVar), "", false, false, false)
+				other := newJSONHandler(&plain, new(slog.LevelVar), "", false, false, handlerOptions{})
 				var h slog.Handler = Tee(branch, other)
 				if mode == "last" {
 					h = Tee(other, branch)
@@ -2432,7 +2365,7 @@ func TestTeeSampledConcurrent(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		other := newJSONHandler(&plain, new(slog.LevelVar), "", false, false, false)
+		other := newJSONHandler(&plain, new(slog.LevelVar), "", false, false, handlerOptions{})
 		lg := WrapHandler(Tee(l.Handler(), other))
 		// 先建立当前 tick，避免把 tick 首次初始化的近似计数误差纳入断言。
 		lg.Info("prime")
@@ -2466,7 +2399,7 @@ func TestWrapHandlerSource(t *testing.T) {
 					c.Hooks = []Hook{func(context.Context, slog.Record) {}}
 				}).IncreaseLevel(LevelInfo).Handler()
 			} else if mode == "mixed-tee" {
-				h = Tee(newJSONHandler(io.Discard, new(slog.LevelVar), "", false, false, false), h)
+				h = Tee(newJSONHandler(io.Discard, new(slog.LevelVar), "", false, false, handlerOptions{}), h)
 			}
 			l := WrapHandler(h).Named("source").WithGroup("request")
 			_, _, line, _ := runtime.Caller(0)
@@ -2480,8 +2413,8 @@ func TestWrapHandlerSource(t *testing.T) {
 	}
 	// 纯本库且关闭 source 的包装链仍应跳过 PC 采集。
 	l := WrapHandler(Tee(
-		newJSONHandler(io.Discard, new(slog.LevelVar), "", false, false, false),
-		newConsoleHandler(io.Discard, new(slog.LevelVar), "", false, false, false),
+		newJSONHandler(io.Discard, new(slog.LevelVar), "", false, false, handlerOptions{}),
+		newConsoleHandler(io.Discard, new(slog.LevelVar), "", false, false, handlerOptions{}),
 	))
 	if l.addSource {
 		t.Error("无 source 需求时不应采集 PC")
@@ -2489,7 +2422,6 @@ func TestWrapHandlerSource(t *testing.T) {
 }
 
 func TestSourceEntryPoints(t *testing.T) {
-	defer SetDefault(nil)
 	calls := []struct {
 		name string
 		call func(*Logger) (line int)
@@ -2498,12 +2430,12 @@ func TestSourceEntryPoints(t *testing.T) {
 		{"info", func(l *Logger) int { _, _, line, _ := runtime.Caller(0); l.Info("source"); return line }},
 		{"warn", func(l *Logger) int { _, _, line, _ := runtime.Caller(0); l.Warn("source"); return line }},
 		{"error", func(l *Logger) int { _, _, line, _ := runtime.Caller(0); l.Error("source"); return line }},
-		{"package-info", func(l *Logger) int { _, _, line, _ := runtime.Caller(0); Info("source"); return line }},
-		{"package-fatal", func(l *Logger) int { _, _, line, _ := runtime.Caller(0); Fatal("source"); return line }},
-		{"package-panic", func(l *Logger) (line int) {
+		{"sugar-info", func(l *Logger) int { _, _, line, _ := runtime.Caller(0); l.Sugar().Info("source"); return line }},
+		{"sugar-fatal", func(l *Logger) int { _, _, line, _ := runtime.Caller(0); l.Sugar().Fatal("source"); return line }},
+		{"sugar-panic", func(l *Logger) (line int) {
 			defer func() { recover() }()
 			_, _, line, _ = runtime.Caller(0)
-			Panic("source")
+			l.Sugar().Panic("source")
 			return line + 1
 		}},
 	}
@@ -2512,10 +2444,8 @@ func TestSourceEntryPoints(t *testing.T) {
 			var out bytes.Buffer
 			l := newTestLogger(t, &out, func(c *Config) { c.AddSource = true })
 			l.SetExitFunc(func(int) {})
-			SetDefault(l)
-			defer SetDefault(nil)
 			line := call.call(l)
-			if call.name == "package-panic" {
+			if call.name == "sugar-panic" {
 				line++ // panic 后由具名返回值保留 runtime.Caller 所在行。
 			}
 			m := parseLines(t, out.String())[0]
@@ -2624,12 +2554,10 @@ func TestRotateLocalTimeAge(t *testing.T) {
 	}
 }
 
-func TestLoggerCloseUnregistersResources(t *testing.T) {
-	globalCloser.mu.Lock()
-	before := len(globalCloser.closers)
-	globalCloser.mu.Unlock()
+func TestDerivedLoggerCloseConcurrently(t *testing.T) {
 	for range 3 {
-		l, err := New(Config{Outputs: []string{filepath.Join(t.TempDir(), "app.log")}, Async: &AsyncConfig{Enabled: true}})
+		path := filepath.Join(t.TempDir(), "app.log")
+		l, err := New(Config{Outputs: []string{path}, Async: &AsyncConfig{Enabled: true}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -2644,77 +2572,40 @@ func TestLoggerCloseUnregistersResources(t *testing.T) {
 			})
 		}
 		wg.Wait()
-	}
-	globalCloser.mu.Lock()
-	defer globalCloser.mu.Unlock()
-	if after := len(globalCloser.closers); after != before {
-		t.Errorf("关闭后全局表保留 %d 个资源引用", after-before)
-	}
-}
-
-func TestInitUnregistersPreviousResources(t *testing.T) {
-	SetDefault(nil)
-	defer SetDefault(nil)
-	globalCloser.mu.Lock()
-	before := len(globalCloser.closers)
-	globalCloser.mu.Unlock()
-	for i := range 3 {
-		if err := Init(Config{
-			Outputs: []string{filepath.Join(t.TempDir(), "app.log")},
-			Async:   &AsyncConfig{Enabled: true, FlushInterval: time.Hour},
-		}); err != nil {
+		data, err := os.ReadFile(path)
+		if err != nil {
 			t.Fatal(err)
 		}
-		Info("reinit", "i", i)
-		globalCloser.mu.Lock()
-		after := len(globalCloser.closers)
-		globalCloser.mu.Unlock()
-		if after != before+2 {
-			t.Errorf("第 %d 次 Init 后保留 %d 个额外引用，want 2", i+1, after-before)
+		if lines := parseLines(t, string(data)); len(lines) != 1 || lines[0]["msg"] != "close" {
+			t.Errorf("并发关闭后的日志不符：%v", lines)
 		}
-	}
-	if err := Default().Close(); err != nil {
-		t.Fatal(err)
-	}
-	globalCloser.mu.Lock()
-	defer globalCloser.mu.Unlock()
-	if len(globalCloser.closers) != before {
-		t.Error("最终 Close 后未释放全局引用")
 	}
 }
 
 func TestArgsToAttrsInvalidKeyMatchesSlog(t *testing.T) {
-	defer SetDefault(nil)
 	for _, args := range [][]any{
 		{123, "valid", "value"},
 		{123, String("field", "value"), "valid", true},
 		{"valid", 1, false, "odd"},
 	} {
-		for _, mode := range []string{"package", "sugar"} {
-			var out, std bytes.Buffer
-			l := newTestLogger(t, &out, func(c *Config) { c.DisableTime = true })
-			SetDefault(l)
-			stdInfo := slog.New(slog.NewJSONHandler(&std, &slog.HandlerOptions{
-				ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
-					if a.Key == slog.TimeKey {
-						return slog.Attr{}
-					}
-					return a
-				},
-			})).Info
-			// 函数变量避开 go vet 对故意无效 key 的静态诊断。
-			stdInfo("bad-key", args...)
-			if mode == "package" {
-				Info("bad-key", args...)
-			} else {
-				l.Sugar().Infow("bad-key", args...)
-			}
-			ours, theirs := parseLines(t, out.String())[0], parseLines(t, std.String())[0]
-			got, _ := json.Marshal(ours)
-			want, _ := json.Marshal(theirs)
-			if string(got) != string(want) {
-				t.Errorf("%s 变参语义不一致: got=%s, want=%s", mode, got, want)
-			}
+		var out, std bytes.Buffer
+		l := newTestLogger(t, &out, func(c *Config) { c.DisableTime = true })
+		stdInfo := slog.New(slog.NewJSONHandler(&std, &slog.HandlerOptions{
+			ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
+				if a.Key == slog.TimeKey {
+					return slog.Attr{}
+				}
+				return a
+			},
+		})).Info
+		// 函数变量避开 go vet 对故意无效 key 的静态诊断。
+		stdInfo("bad-key", args...)
+		l.Sugar().Infow("bad-key", args...)
+		ours, theirs := parseLines(t, out.String())[0], parseLines(t, std.String())[0]
+		got, _ := json.Marshal(ours)
+		want, _ := json.Marshal(theirs)
+		if string(got) != string(want) {
+			t.Errorf("变参语义不一致: got=%s, want=%s", got, want)
 		}
 	}
 }
@@ -2916,13 +2807,14 @@ func TestCyclicLogFields(t *testing.T) {
 	l.Sugar().Infow("next", "shared", dag)
 	args := []any{self, 7}
 	l.Sugar().Infof("map=%+[1]v n=%[2]d", args...)
+	l.Sugar().Info(args...)
 	if _, ok := args[0].(map[string]any); !ok {
 		t.Fatal("格式化修改了调用方的参数")
 	}
 	if format == "json" {
 		lines := parseLines(t, out.String())
-		if len(lines) != 3 {
-			t.Fatalf("应输出三条日志: %s", out.String())
+		if len(lines) != 4 {
+			t.Fatalf("应输出四条日志: %s", out.String())
 		}
 		for k, want := range map[string]string{"cached": "<cycle>", "indirect": "<cycle>", "mixed": "<cycle>", "panic": "!PANIC: <cycle>", "after": "ok"} {
 			if lines[0][k] != want {
@@ -2930,11 +2822,12 @@ func TestCyclicLogFields(t *testing.T) {
 			}
 		}
 		node := map[string]any{"n": float64(1)}
-		if lines[1]["msg"] != "next" || !reflect.DeepEqual(lines[1]["shared"], []any{node, node}) || lines[2]["msg"] != "map=<cycle> n=7" {
+		if lines[1]["msg"] != "next" || !reflect.DeepEqual(lines[1]["shared"], []any{node, node}) ||
+			lines[2]["msg"] != "map=<cycle> n=7" || lines[3]["msg"] != "<cycle> 7" {
 			t.Fatalf("后续记录编码错误: %s", out.String())
 		}
 	} else if want := "INFO cycles cached=<cycle> indirect=<cycle> mixed=<cycle> panic=\"!PANIC: <cycle>\" after=ok\n" +
-		"INFO next shared=\"[map[n:1] map[n:1]]\"\nINFO map=<cycle> n=7\n"; out.String() != want {
+		"INFO next shared=\"[map[n:1] map[n:1]]\"\nINFO map=<cycle> n=7\nINFO <cycle> 7\n"; out.String() != want {
 		t.Fatalf("console = %q, want %q", out.String(), want)
 	}
 	if got, want := logSprintf("%T %[1]p", self), fmt.Sprintf("%T %[1]p", self); got != want {
@@ -2965,7 +2858,7 @@ func TestLogMethodPanicIsolation(t *testing.T) {
 			var err *os.PathError
 			var str *nilLogStringer
 			var friendly *friendlyNilStringer
-			fields := []Field{Err(err), Any("stringer", str), Any("friendly", friendly),
+			fields := []Field{Error(err), Any("stringer", str), Any("friendly", friendly),
 				NamedError("panic_error", panicLogError{}), Any("panic_stringer", panicLogStringer{}), String("after", "ok")}
 			l.Info("record", fields...)
 			l.With(fields...).Info("cached")

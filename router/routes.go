@@ -3,11 +3,9 @@ package router
 import (
 	"github.com/tiyee/holy/engine"
 	"github.com/tiyee/holy/handles"
-	"github.com/tiyee/holy/hooks"
 )
 
 func LoadRouter(r *engine.Engine) {
-	r.Guard(hooks.Logger)
 	r.GET("/health", func(c *engine.Context) { c.JSON(200, map[string]string{"status": "ok"}) })
 	api := r.Group("/api/v1")
 	api.Rest("/users/:id", handles.User{})

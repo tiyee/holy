@@ -11,7 +11,9 @@ import (
 
 	"github.com/tiyee/holy/components/log"
 	"github.com/tiyee/holy/engine"
+	"github.com/tiyee/holy/hooks"
 	"github.com/tiyee/holy/router"
+	logstore "github.com/tiyee/holy/stores/log"
 )
 
 func main() {
@@ -22,10 +24,11 @@ func main() {
 }
 
 func run() (result error) {
-	if err := log.Init(log.Config{Format: "console", Level: "info"}); err != nil {
+	logger, err := logstore.Open(log.Config{Format: "console", Level: "info"})
+	if err != nil {
 		return err
 	}
-	defer func() { result = errors.Join(result, log.Close()) }()
+	defer func() { result = errors.Join(result, logger.Close()) }()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	e := engine.New(func(e *engine.Engine) {
@@ -34,9 +37,10 @@ func run() (result error) {
 			e.SetAddr(addr)
 		}
 	})
+	e.Guard(hooks.Logger(logger))
 	router.LoadRouter(e)
 	shutdown := make(chan error, 1)
-	err := e.Run(func(server *http.Server) {
+	err = e.Run(func(server *http.Server) {
 		go func() {
 			<-ctx.Done()
 			deadline, cancel := context.WithTimeout(context.Background(), 10*time.Second)

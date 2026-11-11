@@ -22,7 +22,15 @@ const (
 	writeErrorReportThreshold = 32
 )
 
-var writeErrorReports atomic.Int64
+// handlerOptions 在同一 Logger 的输出分支及其派生 handler 之间共享配置。
+type handlerOptions struct {
+	trace       TraceExtractor
+	writeErrors *writeErrorReporter
+}
+
+type writeErrorReporter struct {
+	count atomic.Int64
+}
 
 // jsonHandler 是对标 zapcore 的高性能结构化 JSON Handler：
 //   - WithAttrs/With 的公共字段只编码一次，缓存为原始 JSON 片段，输出时直接追加（零重复编码）
@@ -46,7 +54,7 @@ type jsonHandler struct {
 	pending     *pendingJSONGroups
 	epochMillis bool // 行首时间以 Unix 毫秒整数输出（timeLayout 为空时生效）
 	addSource   bool
-	traceOn     bool
+	options     handlerOptions
 }
 
 // pendingJSONGroups 派生后只读共享，记录开启空组前的缓存边界与组数。
@@ -57,14 +65,14 @@ type pendingJSONGroups struct {
 
 // newJSONHandler 构建记录器；timeLayout 为空且 epochMillis 为假表示不输出
 // 行首时间字段（DisableTime）。字段值内的时间始终有输出，见 valueTimeLayout。
-func newJSONHandler(w io.Writer, leveler slog.Leveler, timeLayout string, addSource, traceOn, epochMillis bool) *jsonHandler {
+func newJSONHandler(w io.Writer, leveler slog.Leveler, timeLayout string, addSource, epochMillis bool, options handlerOptions) *jsonHandler {
 	return &jsonHandler{
 		w:           w,
 		leveler:     leveler,
 		timeLayout:  timeLayout,
 		epochMillis: epochMillis,
 		addSource:   addSource,
-		traceOn:     traceOn,
+		options:     options,
 	}
 }
 
@@ -172,8 +180,8 @@ func (h *jsonHandler) Handle(ctx context.Context, r slog.Record) error {
 	buf.bs = appendJSONString(buf.bs, r.Message)
 
 	// 链路标识属于基础设施元数据，始终置于顶层
-	if h.traceOn {
-		if ti, ok := extractTrace(ctx); ok {
+	if h.options.trace != nil && ctx != nil {
+		if ti, ok := h.options.trace(ctx); ok {
 			buf.AppendString(`,"trace_id":`)
 			buf.bs = appendJSONString(buf.bs, ti.TraceID)
 			buf.AppendString(`,"span_id":`)
@@ -212,7 +220,7 @@ func (h *jsonHandler) Handle(ctx context.Context, r slog.Record) error {
 
 	_, err := h.w.Write(buf.bs)
 	if err != nil {
-		reportWriteError(err, buf.bs)
+		h.options.writeErrors.report(err, buf.bs)
 	}
 	putBuffer(buf)
 	return err
@@ -232,9 +240,9 @@ func appendCommaIfNeeded(buf *buffer) {
 	buf.AppendByte(',')
 }
 
-// reportWriteError 在底层写入失败时兜底输出到 stderr（限次，避免雪崩）。
-func reportWriteError(err error, line []byte) {
-	if writeErrorReports.Add(1) > writeErrorReportThreshold {
+// report 在底层写入失败时兜底输出到 stderr，每个 Logger 实例各自限次。
+func (r *writeErrorReporter) report(err error, line []byte) {
+	if r == nil || r.count.Add(1) > writeErrorReportThreshold {
 		return
 	}
 	fmt.Fprintf(os.Stderr, "log: write failed: %v, raw line: %s\n", err, line)

@@ -14,7 +14,10 @@ import (
 
 // Logger 提供对齐 zap.Logger 的强类型 API，底层完全基于 slog.Handler：
 //
-//	l := log.New(cfg)
+//	l, err := log.New(cfg)
+//	if err != nil {
+//		return err
+//	}
 //	l.Info("user login", log.String("uid", "42"), log.Int("source", 3))
 //	s := l.Sugar()
 //	s.Infof("user login uid=%s", uid)
@@ -36,7 +39,7 @@ type Logger struct {
 	levelVar    *slog.LevelVar
 }
 
-// New 按配置构建 Logger。
+// New 按配置构建独立的 Logger。调用方负责关闭实例所拥有的资源。
 func New(cfg Config) (*Logger, error) {
 	h, lv, closers, err := buildHandler(&cfg)
 	if err != nil {
@@ -49,7 +52,6 @@ func New(cfg Config) (*Logger, error) {
 		}
 		return nil, errors.Join(errs...)
 	}
-	registerClosers(closers)
 	l := newLogger(h, lv, closers, cfg.Development, cfg.AddSource)
 	l.now = cfg.Now
 	l.fatalHook = cfg.FatalHook
@@ -79,7 +81,7 @@ func (l *Logger) SetExitFunc(fn func(int)) { l.exit = fn }
 
 // WrapHandler 将任意 slog.Handler（本库、标准库或第三方的）包装为 Logger，
 // 使其获得 zap 风格 API、堆栈/级别扩展与 Fatal 语义。
-// handler 持有的资源由创建方管理；Sync 仅冲刷通过 New 注册的资源。
+// handler 持有的资源由创建方管理；Sync 仅冲刷由 New 为实例创建的资源。
 // 本库 handler 按其 AddSource 配置决定是否采集 PC；外部 handler 的选项不可
 // 查询，因此默认采集 PC，供其 source 输出使用。
 func WrapHandler(h slog.Handler) *Logger {
@@ -273,7 +275,6 @@ func (l *Logger) Close() error {
 			errs = append(errs, err)
 		}
 	}
-	unregisterClosers(l.closers)
 	return errors.Join(errs...)
 }
 
@@ -419,7 +420,7 @@ func stackTrace() string {
 
 // ---------- SugaredLogger（对应 zap.SugaredLogger） ----------
 
-// SugaredLogger 提供宽松的格式化与 kv 变参 API。
+// SugaredLogger 支持拼接消息、格式化消息和结构化键值对。
 type SugaredLogger struct {
 	l *Logger
 }
@@ -427,6 +428,42 @@ type SugaredLogger struct {
 func (l *Logger) Sugar() *SugaredLogger { return &SugaredLogger{l: l} }
 
 func (s *SugaredLogger) Desugar() *Logger { return s.l }
+
+func (s *SugaredLogger) Debug(args ...any) { s.l.logArgs(LevelDebug, args) }
+func (s *SugaredLogger) Info(args ...any)  { s.l.logArgs(LevelInfo, args) }
+func (s *SugaredLogger) Warn(args ...any)  { s.l.logArgs(LevelWarn, args) }
+func (s *SugaredLogger) Error(args ...any) { s.l.logArgs(LevelError, args) }
+
+func (s *SugaredLogger) DPanic(args ...any) {
+	r, ok := s.l.logArgs(LevelDPanic, args)
+	if s.l.development {
+		if ok {
+			s.l.runFatalHooks(r)
+		}
+		s.panicWithMessage(r, ok, args)
+	}
+}
+
+func (s *SugaredLogger) Panic(args ...any) {
+	r, ok := s.l.logArgs(LevelPanic, args)
+	s.panicWithMessage(r, ok, args)
+}
+
+func (s *SugaredLogger) Fatal(args ...any) {
+	if r, ok := s.l.logArgs(LevelFatal, args); ok {
+		s.l.runFatalHooks(r)
+	}
+	_ = s.l.Sync()
+	s.l.exit(1)
+}
+
+func (s *SugaredLogger) panicWithMessage(r slog.Record, logged bool, args []any) {
+	_ = s.l.Sync()
+	if logged {
+		panic(r.Message)
+	}
+	panic(logSprint(args))
+}
 
 func (s *SugaredLogger) Debugf(format string, args ...any) { s.l.logf(LevelDebug, format, args) }
 func (s *SugaredLogger) Infof(format string, args ...any)  { s.l.logf(LevelInfo, format, args) }
@@ -496,6 +533,14 @@ func (s *SugaredLogger) Fatalw(msg string, keysAndValues ...any) {
 
 func (s *SugaredLogger) Sync() error { return s.l.Sync() }
 
+// logArgs 在级别检查通过后才拼接消息。调用方是 Sugar 方法，skip 为 5。
+func (l *Logger) logArgs(lvl slog.Level, args []any) (slog.Record, bool) {
+	if !l.handler.Enabled(l.ctx, lvl) {
+		return slog.Record{}, false
+	}
+	return l.emit(l.ctx, lvl, logSprint(args), nil, 5)
+}
+
 // logf：先短路再格式化，禁用级别下无 Sprintf 成本；返回写出的记录（供 Hook 使用）。
 func (l *Logger) logf(lvl slog.Level, format string, args []any) (slog.Record, bool) {
 	if !l.handler.Enabled(l.ctx, lvl) {
@@ -505,10 +550,35 @@ func (l *Logger) logf(lvl slog.Level, format string, args []any) (slog.Record, b
 	return l.emit(l.ctx, lvl, logSprintf(format, args...), nil, 5)
 }
 
-// logw：kv 变参转 Attr，规则与包级 argsToAttrs 一致（落单值记 !BADKEY）。
+// logw 将结构化键值对转换为字段（落单值记 !BADKEY）。
 func (l *Logger) logw(lvl slog.Level, msg string, kv []any) (slog.Record, bool) {
 	if !l.handler.Enabled(l.ctx, lvl) {
 		return slog.Record{}, false
 	}
 	return l.emit(l.ctx, lvl, msg, argsToAttrs(kv), 5)
+}
+
+// argsToAttrs 遵循 slog 的变参规则：
+// 参数中的 Field 原样保留，字符串 key 与下一项配对；无效 key 和落单值标记 !BADKEY。
+func argsToAttrs(args []any) []Field {
+	if len(args) == 0 {
+		return nil
+	}
+	fields := make([]Field, 0, len(args)/2+1)
+	for i := 0; i < len(args); {
+		if a, ok := args[i].(Field); ok {
+			fields = append(fields, a)
+			i++
+			continue
+		}
+		// 字符串 key 直传，避免格式化与装箱；无效 key 只消耗自身。
+		if k, ok := args[i].(string); ok && i+1 < len(args) {
+			fields = append(fields, slog.Any(k, args[i+1]))
+			i += 2
+			continue
+		}
+		fields = append(fields, slog.Any("!BADKEY", args[i]))
+		i++
+	}
+	return fields
 }

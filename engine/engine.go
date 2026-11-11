@@ -10,8 +10,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/tiyee/holy/components/log"
 )
 
 // Engine 在启动阶段串行配置。调用 Prepare 或 Run 冻结配置后，可供并发请求共享。
@@ -133,7 +131,6 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if err == http.ErrAbortHandler {
 				panic(err)
 			}
-			log.Error("request panic", log.Any("panic", err), log.String("method", r.Method), log.String("path", r.URL.Path))
 			c.Abort()
 			if !c.writer.Written() {
 				c.Error("internal error", http.StatusInternalServerError)
